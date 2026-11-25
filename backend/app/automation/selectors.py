@@ -1,30 +1,24 @@
-# Update these IDs/selectors after inspecting freesearchigrservice.maharashtra.gov.in
-# Tip: ASP.NET WebForms IDs often end with $ddlYear, $ddlDistrict, $txtCaptcha, etc.
 SELECTORS = {
-    # Region / Tab buttons or radios (e.g., Mumbai, Rest of Maharashtra, Urban Areas)
-    "region_rest_of_mh": "input[id*='RestOfMaharashtra'], a:has-text('Rest of Maharashtra')",
-    "region_mumbai": "input[id*='Mumbai'], a:has-text('Mumbai')",
-    "region_urban": "input[id*='Urban'], a:has-text('Urban')",
+    # Region buttons
+    "region_mumbai": "#btnMumbaisearch",
+    "region_rest_of_mh": "#btnOtherdistrictSearch",
+    "region_urban": "#btnUrbansearch",
 
-    # Search mode toggles (Property Details vs Document Number)
-    "mode_property": "input[id*='Property'], label:has-text('Property')",
-    "mode_document": "input[id*='Document'], label:has-text('Document')",
+    # Cascading dropdowns
+    "year_select": "#ddlFromYear",
+    "district_select": "#ddlDistrict",
+    "area_select": "#ddlareaname",
 
-    # Common cascading dropdowns & inputs
-    "year_select": "select[id*='Year'], select[id*='ddlYear']",
-    "district_select": "select[id*='District'], select[id*='ddlDistrict']",
-    "sro_select": "select[id*='SRO'], select[id*='ddlSRO'], select[id*='Office']",
-    "village_input": "input[id*='Village'], input[id*='txtVillage']",
-    "village_select": "select[id*='Village'], select[id*='ddlVillage']",
-    "property_no_input": "input[id*='PropertyNo'], input[id*='SurveyNo'], input[id*='txtProperty']",
-    "doc_no_input": "input[id*='DocNo'], input[id*='DocumentNo'], input[id*='txtDocument']",
+    # Search text inputs
+    "area_name_input": "#txtAreaName",
+    "attribute_value_input": "#txtAttributeValue",
 
-    # CAPTCHA & Search button
-    "captcha_img": "img[id*='Captcha'], img[id*='captcha']",
-    "captcha_input": "input[id*='Captcha'], input[id*='captcha']",
-    "search_btn": "input[type='submit'][value*='Search'], button:has-text('Search'), a:has-text('Search')",
+    # CAPTCHA & Search submit
+    "captcha_img": "#imgCaptcha",
+    "captcha_input": "#txtImg",
+    "search_btn": "#btnSearch",
 
-    # Results table & Index II link
+    # Results table & Index II link (refine once results page is captured)
     "results_rows": "table[id*='Grid'] tr, table.table tr",
     "index_ii_link": "a:has-text('Index'), a:has-text('IndexII'), input[value*='Index']",
 }

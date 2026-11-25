@@ -14,7 +14,8 @@ from app.models.schemas import (
     JobDetailResponse,
     PropertyRecordResponse,
 )
-
+import sys
+import asyncio
 router = APIRouter(prefix="/api", tags=["IGR Automation"])
 
 
@@ -26,6 +27,8 @@ def add_log(db: Session, job_id: UUID, message: str, level: str = "INFO", step: 
 
 def enqueue_job(job_id: UUID):
     """Runs the async Playwright bot inside a background task."""
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     asyncio.run(execute_igr_job(job_id))
 
 
