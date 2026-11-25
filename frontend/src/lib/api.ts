@@ -28,6 +28,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<{ status: string }>("/health"),
   listDistricts: () => request<DistrictOption[]>("/api/metadata/districts"),
+  listSros: (district: string) =>
+    request<{ district: string; source: string; items: string[] }>(
+      `/api/metadata/sros?district=${encodeURIComponent(district)}`
+    ),
+  listTahsils: (district: string) =>
+    request<{ district: string; source: string; items: string[] }>(
+      `/api/metadata/tahsils?district=${encodeURIComponent(district)}`
+    ),
+  listVillages: (district: string, tahsil: string) =>
+    request<{ district: string; tahsil: string; source: string; items: string[] }>(
+      `/api/metadata/villages?district=${encodeURIComponent(district)}&tahsil=${encodeURIComponent(tahsil)}`
+    ),
   createJob: (payload: { search_type: SearchType; criteria: Record<string, unknown> }) =>
     request<JobSummary>("/api/jobs", {
       method: "POST",

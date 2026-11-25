@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Building2, FileText, Loader2, Play } from "lucide-react";
+import { api } from "@/lib/api";
 import type { DistrictOption, RegionType, SearchType } from "@/lib/types";
 
 interface SearchFormProps {
@@ -26,6 +27,94 @@ export function SearchForm({ districts, onSubmit }: SearchFormProps) {
   const [partyName, setPartyName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [sroOptions, setSroOptions] = useState<string[]>([]);
+  const [loadingSros, setLoadingSros] = useState(false);
+  const [tahsilOptions, setTahsilOptions] = useState<string[]>([]);
+  const [loadingTahsils, setLoadingTahsils] = useState(false);
+  const [villageOptions, setVillageOptions] = useState<string[]>([]);
+  const [loadingVillages, setLoadingVillages] = useState(false);
+
+  // Load live SROs from portal when District changes in DOCUMENT mode
+  useEffect(() => {
+    if (searchType !== "DOCUMENT" || !district.trim()) {
+      setSroOptions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setLoadingSros(true);
+      api
+        .listSros(district.trim())
+        .then((res) => {
+          if (!cancelled) setSroOptions(res.items || []);
+        })
+        .catch(() => {
+          if (!cancelled) setSroOptions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingSros(false);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchType, district]);
+
+  // Load live Tahsils when District changes in REST / URBAN PROPERTY mode
+  useEffect(() => {
+    if (searchType !== "PROPERTY" || region === "MUMBAI" || !district.trim()) {
+      setTahsilOptions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setLoadingTahsils(true);
+      api
+        .listTahsils(district.trim())
+        .then((res) => {
+          if (!cancelled) setTahsilOptions(res.items || []);
+        })
+        .catch(() => {
+          if (!cancelled) setTahsilOptions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingTahsils(false);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchType, region, district]);
+
+  // Load live Villages when District + Tahsil change in REST / URBAN PROPERTY mode
+  useEffect(() => {
+    if (searchType !== "PROPERTY" || region === "MUMBAI" || !district.trim() || !tahsil.trim()) {
+      setVillageOptions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setLoadingVillages(true);
+      api
+        .listVillages(district.trim(), tahsil.trim())
+        .then((res) => {
+          if (!cancelled) setVillageOptions(res.items || []);
+        })
+        .catch(() => {
+          if (!cancelled) setVillageOptions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingVillages(false);
+        });
+    }, 450);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchType, region, district, tahsil]);
 
   const handleRegionChange = (nextRegion: RegionType) => {
     setRegion(nextRegion);
@@ -243,24 +332,48 @@ export function SearchForm({ districts, onSubmit }: SearchFormProps) {
         {searchType === "PROPERTY" && region !== "MUMBAI" && (
           <>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-700">Tahsil</label>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="text-xs font-medium text-slate-700">Tahsil</label>
+                {loadingTahsils && <span className="text-[10px] text-indigo-600">Loading portal tahsils...</span>}
+                {!loadingTahsils && tahsilOptions.length > 0 && (
+                  <span className="text-[10px] text-emerald-600">{tahsilOptions.length} portal options</span>
+                )}
+              </div>
               <input
+                list="igr-tahsils"
                 type="text"
                 value={tahsil}
                 onChange={(e) => setTahsil(e.target.value)}
-                placeholder="e.g., Haveli"
+                placeholder="e.g., Haveli or हवेली"
                 className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
               />
+              <datalist id="igr-tahsils">
+                {tahsilOptions.map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-700">Village</label>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="text-xs font-medium text-slate-700">Village</label>
+                {loadingVillages && <span className="text-[10px] text-indigo-600">Loading portal villages...</span>}
+                {!loadingVillages && villageOptions.length > 0 && (
+                  <span className="text-[10px] text-emerald-600">{villageOptions.length} portal options</span>
+                )}
+              </div>
               <input
+                list="igr-villages"
                 type="text"
                 value={village}
                 onChange={(e) => setVillage(e.target.value)}
-                placeholder="e.g., Baner"
+                placeholder="e.g., Baner or बाणेर"
                 className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
               />
+              <datalist id="igr-villages">
+                {villageOptions.map((v) => (
+                  <option key={v} value={v} />
+                ))}
+              </datalist>
             </div>
           </>
         )}
@@ -281,14 +394,26 @@ export function SearchForm({ districts, onSubmit }: SearchFormProps) {
         ) : (
           <>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-700">Sub-Registrar Office (SRO)</label>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="text-xs font-medium text-slate-700">Sub-Registrar Office (SRO)</label>
+                {loadingSros && <span className="text-[10px] text-indigo-600">Loading portal SROs...</span>}
+                {!loadingSros && sroOptions.length > 0 && (
+                  <span className="text-[10px] text-emerald-600">{sroOptions.length} portal SROs</span>
+                )}
+              </div>
               <input
+                list="igr-sros"
                 type="text"
                 value={sro}
                 onChange={(e) => setSro(e.target.value)}
-                placeholder="e.g., Joint S.R. Haveli 5 or Haveli 5 (Pimpri)"
+                placeholder="Pick or type e.g., Joint S.R. Haveli 5"
                 className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
               />
+              <datalist id="igr-sros">
+                {sroOptions.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">Document Number</label>

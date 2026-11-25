@@ -17,6 +17,11 @@ from app.models.schemas import (
     PropertyRecordResponse,
 )
 from app.services.job_queue import submit_job_to_queue
+from app.services.portal_metadata import (
+    get_sros_for_district,
+    get_tahsils_for_district,
+    get_villages_for_tahsil,
+)
 
 router = APIRouter(prefix="/api", tags=["IGR Automation"])
 
@@ -46,6 +51,30 @@ def _to_job_summary(job: SearchJob) -> JobSummaryResponse:
 def list_supported_districts():
     """Return all official Maharashtra districts with English & Marathi names."""
     return OFFICIAL_DISTRICTS
+
+
+@router.get("/metadata/sros")
+def list_sros_for_district(district: str = Query(..., min_length=1)):
+    """Fetch & cache Sub-Registrar Offices (SROs) for a district from the live portal."""
+    items, source = get_sros_for_district(district)
+    return {"district": district, "source": source, "items": items}
+
+
+@router.get("/metadata/tahsils")
+def list_tahsils_for_district(district: str = Query(..., min_length=1)):
+    """Fetch & cache Tahsils for a district from the live portal."""
+    items, source = get_tahsils_for_district(district)
+    return {"district": district, "source": source, "items": items}
+
+
+@router.get("/metadata/villages")
+def list_villages_for_tahsil(
+    district: str = Query(..., min_length=1),
+    tahsil: str = Query(..., min_length=1),
+):
+    """Fetch & cache Villages for a district & tahsil from the live portal."""
+    items, source = get_villages_for_tahsil(district, tahsil)
+    return {"district": district, "tahsil": tahsil, "source": source, "items": items}
 
 
 @router.post("/jobs", response_model=JobSummaryResponse, status_code=201)

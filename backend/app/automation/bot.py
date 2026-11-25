@@ -437,8 +437,10 @@ class IGRPortalBot:
             radio_sel = mode_cfg["doc_type_radios"].get(doc_type)
             if radio_sel:
                 radio_loc = page.locator(radio_sel).first
-                if await radio_loc.count() > 0 and not await radio_loc.is_checked():
-                    await self._click_and_wait(page, radio_sel, f"Document Type ({criteria.get('doc_type')})")
+                if await radio_loc.count() > 0:
+                    if not await radio_loc.is_checked():
+                        await radio_loc.check(force=True)
+                    self._log(f"Selected Document Type: {criteria.get('doc_type') or 'Regular'}", step="FORM")
 
             selected_dist = await self._select_option(
                 page,
