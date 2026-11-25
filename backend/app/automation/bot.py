@@ -202,9 +202,9 @@ class IGRPortalBot:
         if await loc.count() == 0:
             self._log(f"Control '{label}' ({selector}) not found.", level="WARNING", step="NAVIGATE")
             return False
-        await loc.click(timeout=15000)
+        await loc.click(timeout=30000, no_wait_after=True)
         self._log(f"Clicked {label}.", step="NAVIGATE")
-        await self._wait_for_postback(page, wait_selector=wait_selector, delay=0.6)
+        await self._wait_for_postback(page, wait_selector=wait_selector, delay=0.6, timeout=45.0)
         return True
 
     async def _select_option(
