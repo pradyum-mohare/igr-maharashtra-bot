@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.automation.parser import DISTRICT_ALIASES
+from app.automation.parser import OFFICIAL_DISTRICTS
 from app.database import get_db
 from app.models import AutomationLog, DocumentFile, PropertyRecord, SearchJob
 from app.models.schemas import (
@@ -44,11 +44,8 @@ def _to_job_summary(job: SearchJob) -> JobSummaryResponse:
 
 @router.get("/metadata/districts")
 def list_supported_districts():
-    """Return supported Maharashtra districts with English & Marathi names."""
-    return [
-        {"english": key.title(), "marathi": val}
-        for key, val in DISTRICT_ALIASES.items()
-    ]
+    """Return all official Maharashtra districts with English & Marathi names."""
+    return OFFICIAL_DISTRICTS
 
 
 @router.post("/jobs", response_model=JobSummaryResponse, status_code=201)

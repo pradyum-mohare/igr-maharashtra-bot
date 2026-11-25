@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID
 from playwright.async_api import async_playwright, BrowserContext, Dialog, Page
 
-from app.automation.parser import DISTRICT_ALIASES, parse_index_ii_text
+from app.automation.parser import match_dropdown_option, parse_index_ii_text
 from app.automation.selectors import COMMON_SELECTORS, MODE_SELECTORS
 from app.config import settings
 from app.database import SessionLocal
@@ -224,72 +224,20 @@ class IGRPortalBot:
             return None
 
         target_str = str(value).strip()
-        alias_target = DISTRICT_ALIASES.get(target_str.lower())
+        options = await loc.evaluate(
+            "(el) => Array.from(el.options).map(o => ({ value: (o.value || '').trim(), text: (o.text || '').trim() }))"
+        )
+        matched = match_dropdown_option(options or [], target_str)
+        if not matched:
+            self._log(
+                f"Could not match '{target_str}' in '{label}'; skipping.",
+                level="WARNING",
+                step="FORM",
+            )
+            return None
 
-        selected_text = None
-        try:
-            await loc.select_option(label=target_str)
-            selected_text = target_str
-        except Exception:
-            try:
-                await loc.select_option(value=target_str)
-                selected_text = target_str
-            except Exception:
-                matched = await loc.evaluate(
-                    """(selectEl, args) => {
-                        const [raw, alias] = args;
-                        const normRaw = raw.toLowerCase().trim();
-                        const normAlias = (alias || '').toLowerCase().trim();
-                        const stripped = normRaw.replace(/\\([^)]*\\)/g, ' ').replace(/\\s+/g, ' ').trim();
-                        const tokens = stripped.split(/[^a-z0-9\\u0900-\\u097f]+/).filter(Boolean);
-                        const validOpts = Array.from(selectEl.options).filter(opt => {
-                            const txt = (opt.text || '').trim();
-                            const val = (opt.value || '').trim();
-                            return val && val !== '0' && val !== '-1' && !txt.startsWith('---');
-                        });
-
-                        for (const opt of validOpts) {
-                            const txt = opt.text.trim();
-                            const low = txt.toLowerCase();
-                            const val = opt.value.trim().toLowerCase();
-                            if (low === normRaw || val === normRaw || (normAlias && low === normAlias)) {
-                                return { value: opt.value, text: txt };
-                            }
-                        }
-                        for (const opt of validOpts) {
-                            const txt = opt.text.trim();
-                            const low = txt.toLowerCase();
-                            if (
-                                (normAlias && (low.includes(normAlias) || txt.includes(alias))) ||
-                                low.includes(normRaw) ||
-                                (stripped && low.includes(stripped))
-                            ) {
-                                return { value: opt.value, text: txt };
-                            }
-                        }
-                        if (tokens.length > 0) {
-                            for (const opt of validOpts) {
-                                const txt = opt.text.trim();
-                                const optTokens = txt.toLowerCase().split(/[^a-z0-9\\u0900-\\u097f]+/).filter(Boolean);
-                                if (tokens.every(t => optTokens.includes(t))) {
-                                    return { value: opt.value, text: txt };
-                                }
-                            }
-                        }
-                        return null;
-                    }""",
-                    [target_str, alias_target],
-                )
-                if matched:
-                    await loc.select_option(value=matched["value"])
-                    selected_text = matched["text"]
-                else:
-                    self._log(
-                        f"Could not match '{target_str}' in '{label}'; skipping.",
-                        level="WARNING",
-                        step="FORM",
-                    )
-                    return None
+        await loc.select_option(value=matched["value"])
+        selected_text = matched["text"]
 
         self._log(f"Selected {label}: {selected_text}", step="FORM")
         await self._wait_for_postback(
@@ -297,6 +245,7 @@ class IGRPortalBot:
             wait_selector=dependent_selector,
             min_options=2 if dependent_selector else None,
             delay=0.5,
+            timeout=30.0,
         )
         return selected_text
 
@@ -312,7 +261,7 @@ class IGRPortalBot:
         await loc.fill(text_val)
         self._log(f"Entered {label}: {text_val}", step="FORM")
         if trigger_postback:
-            await loc.press("Tab")
+            await loc.dispatch_event("change")
 
     async def _capture_captcha_bytes(self, page: Page, img_loc) -> bytes:
         await self._wait_for_loading_to_finish(page, max_wait=15.0)
@@ -534,11 +483,12 @@ class IGRPortalBot:
                 mode_cfg["district_select"],
                 criteria.get("district") or "Mumbai",
                 "District",
+                dependent_selector=mode_cfg["village_select"],
             )
             area_query = criteria.get("area_name") or criteria.get("village") or criteria.get("area")
             if area_query:
                 await self._fill_input(page, mode_cfg["area_name_input"], str(area_query)[:20], "Village Search Text", trigger_postback=True)
-                await self._wait_for_postback(page, wait_selector=mode_cfg["village_select"], min_options=2, delay=0.5)
+                await self._wait_for_postback(page, wait_selector=mode_cfg["village_select"], min_options=2, delay=0.5, timeout=30.0)
             selected_village = await self._select_option(
                 page,
                 mode_cfg["village_select"],
