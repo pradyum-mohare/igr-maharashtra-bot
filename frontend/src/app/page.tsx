@@ -37,14 +37,18 @@ export default function DashboardPage() {
     try {
       const [healthRes, jobsRes, recordsRes] = await Promise.all([
         api.health().then(() => true).catch(() => false),
-        api.listJobs({ status: statusFilter }),
-        api.listRecords({ q: recordQuery || undefined, year: recordYear || undefined }),
+        api.listJobs({ status: statusFilter }).catch(() => null),
+        api.listRecords({ q: recordQuery || undefined, year: recordYear || undefined }).catch(() => null),
       ]);
       setApiHealthy(healthRes);
-      setJobs(jobsRes);
-      setRecords(recordsRes);
-      if (!selectedJobId && jobsRes.length > 0) {
-        setSelectedJobId(jobsRes[0].id);
+      if (jobsRes) {
+        setJobs(jobsRes);
+        if (!selectedJobId && jobsRes.length > 0) {
+          setSelectedJobId(jobsRes[0].id);
+        }
+      }
+      if (recordsRes) {
+        setRecords(recordsRes);
       }
     } finally {
       setLoading(false);
