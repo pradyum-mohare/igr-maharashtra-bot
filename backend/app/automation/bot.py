@@ -1,60 +1,29 @@
+"""Playwright automation agent for the Maharashtra IGR Free Search portal."""
+
 import asyncio
 import base64
 import re
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
-from playwright.async_api import async_playwright, Page, BrowserContext
+from playwright.async_api import async_playwright, BrowserContext, Dialog, Page
+
+from app.automation.parser import DISTRICT_ALIASES, parse_index_ii_text
+from app.automation.selectors import COMMON_SELECTORS, MODE_SELECTORS
 from app.config import settings
 from app.database import SessionLocal
-from app.models import SearchJob, PropertyRecord, DocumentFile, AutomationLog
-from app.automation.selectors import SELECTORS
+from app.models import AutomationLog, DocumentFile, PropertyRecord, SearchJob
+from app.services.storage import storage_service
 
 
-DISTRICT_ALIASES = {
-    "pune": "पुणे",
-    "satara": "सातारा",
-    "sangli": "सांगली",
-    "kolhapur": "कोल्हापूर",
-    "solapur": "सोलापूर",
-    "thane": "ठाणे",
-    "raigad": "रायगड",
-    "sindhudurg": "सिंधुदुर्ग",
-    "palghar": "पालघर",
-    "nashik": "नाशिक",
-    "jalgaon": "जळगाव",
-    "dhule": "धुळे",
-    "ahilyanagar": "अहिल्यानगर",
-    "ahmednagar": "अहिल्यानगर",
-    "nandurbar": "नंदुरबार",
-    "chhatrapati sambhajinagar": "छत्रपती संभाजीनगर",
-    "aurangabad": "छत्रपती संभाजीनगर",
-    "jalna": "जालना",
-    "beed": "बीड",
-    "latur": "लातूर",
-    "dharashiv": "धाराशिव",
-    "osmanabad": "धाराशिव",
-    "nanded": "नांदेड",
-    "parbhani": "परभणी",
-    "hingoli": "हिंगोली",
-    "amravati": "अमरावती",
-    "akola": "अकोला",
-    "washim": "वाशिम",
-    "buldhana": "बुलढाणा",
-    "yavatmal": "यवतमाळ",
-    "nagpur": "नागपूर",
-    "wardha": "वर्धा",
-    "bhandara": "भंडारा",
-    "gondia": "गोंदिया",
-    "chandrapur": "चंद्रपूर",
-    "gadchiroli": "गडचिरोली",
-}
+class JobCancelledError(Exception):
+    """Raised when the user cancels a running automation job."""
 
 
 class IGRPortalBot:
     def __init__(self, job_id: UUID):
         self.job_id = job_id
-        self.storage_dir = settings.resolved_storage_path()
+        self.last_dialog_message: str | None = None
 
     def _log(self, message: str, level: str = "INFO", step: str | None = None):
         db = SessionLocal()
@@ -64,7 +33,13 @@ class IGRPortalBot:
         finally:
             db.close()
 
-    def _set_status(self, status: str, captcha_b64: str | None = None, error: str | None = None):
+    def _set_status(
+        self,
+        status: str,
+        captcha_b64: str | None = None,
+        error: str | None = None,
+        portal_notice: str | None = None,
+    ):
         db = SessionLocal()
         try:
             job = db.query(SearchJob).filter(SearchJob.id == self.job_id).first()
@@ -75,29 +50,53 @@ class IGRPortalBot:
                 job.captcha_image_base64 = captcha_b64
             if status == "PROCESSING":
                 job.captcha_solution = None
+                job.captcha_refresh_requested = False
             if error is not None:
                 job.error_message = error
+            if portal_notice is not None:
+                job.portal_notice = portal_notice
             db.commit()
         finally:
             db.close()
 
-    def _get_job_snapshot(self) -> tuple[str, dict, str | None]:
+    def _get_job_snapshot(self) -> tuple[str, dict, bool]:
         db = SessionLocal()
         try:
             job = db.query(SearchJob).filter(SearchJob.id == self.job_id).first()
-            return job.search_type, dict(job.criteria or {}), job.captcha_solution
+            if not job:
+                raise ValueError(f"SearchJob {self.job_id} not found")
+            return job.search_type, dict(job.criteria or {}), bool(job.cancel_requested)
         finally:
             db.close()
+
+    def _check_cancelled(self):
+        db = SessionLocal()
+        try:
+            job = db.query(SearchJob).filter(SearchJob.id == self.job_id).first()
+            if job and job.cancel_requested:
+                raise JobCancelledError("Job cancelled by user.")
+        finally:
+            db.close()
+
+    def _attach_dialog_handler(self, page: Page):
+        async def on_dialog(dialog: Dialog):
+            self.last_dialog_message = dialog.message
+            self._log(f"Portal dialog: {dialog.message}", level="WARNING", step="PORTAL")
+            try:
+                await dialog.accept()
+            except Exception:
+                pass
+
+        page.on("dialog", on_dialog)
 
     async def _goto_with_retry(self, page: Page, url: str, attempts: int = 3):
         last_exc = None
         for attempt in range(1, attempts + 1):
+            self._check_cancelled()
             try:
-                self._log(
-                    f"Navigating to {url} (attempt {attempt}/{attempts})...",
-                    step="NAVIGATE",
-                )
+                self._log(f"Navigating to {url} (attempt {attempt}/{attempts})...", step="NAVIGATE")
                 await page.goto(url, wait_until="commit", timeout=90000)
+                await page.wait_for_selector("body", timeout=30000)
                 return
             except Exception as exc:
                 last_exc = exc
@@ -110,15 +109,16 @@ class IGRPortalBot:
                     await asyncio.sleep(3.0)
         raise last_exc
 
-    async def _wait_for_loading_to_finish(self, page: Page, max_wait: float = 15.0):
+    async def _wait_for_loading_to_finish(self, page: Page, max_wait: float = 20.0):
         elapsed = 0.0
-        step = 0.4
+        step = 0.35
         while elapsed < max_wait:
+            self._check_cancelled()
             still_loading = False
             try:
                 still_loading = await page.evaluate(
-                    """() => {
-                        const loaders = document.querySelectorAll('[id*="UpdateProgress"], [id*="Progress"], .loading, .loader');
+                    """(selector) => {
+                        const loaders = document.querySelectorAll(selector);
                         for (const el of loaders) {
                             const style = window.getComputedStyle(el);
                             const rect = el.getBoundingClientRect();
@@ -127,7 +127,8 @@ class IGRPortalBot:
                             }
                         }
                         return false;
-                    }"""
+                    }""",
+                    COMMON_SELECTORS["update_progress"],
                 )
             except Exception:
                 still_loading = False
@@ -136,16 +137,35 @@ class IGRPortalBot:
             await asyncio.sleep(step)
             elapsed += step
 
-    async def _wait_for_postback(self, page: Page, delay: float = 1.0):
-        try:
-            await page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
-            pass
-        await self._wait_for_loading_to_finish(page, max_wait=15.0)
+    async def _wait_for_postback(
+        self,
+        page: Page,
+        wait_selector: str | None = None,
+        min_options: int | None = None,
+        delay: float = 0.6,
+        timeout: float = 20.0,
+    ):
+        await asyncio.sleep(0.35)
+        await self._wait_for_loading_to_finish(page, max_wait=timeout)
+        if wait_selector:
+            elapsed = 0.0
+            while elapsed < timeout:
+                try:
+                    loc = page.locator(wait_selector).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        if min_options is None:
+                            break
+                        opt_count = await loc.evaluate("el => el.options ? el.options.length : 0")
+                        if opt_count >= min_options:
+                            break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.35)
+                elapsed += 0.35
         await asyncio.sleep(delay)
 
     async def _dismiss_popup_if_present(self, page: Page):
-        popup = page.locator("#popup").first
+        popup = page.locator(COMMON_SELECTORS["popup"]).first
         if await popup.count() == 0:
             return
         try:
@@ -154,16 +174,14 @@ class IGRPortalBot:
         except Exception:
             return
 
-        close_candidates = popup.locator(
-            "button, a, input[type='button'], input[type='submit'], [class*='close'], [id*='close']"
-        )
+        close_candidates = popup.locator(COMMON_SELECTORS["popup_close"])
         for i in range(await close_candidates.count()):
             btn = close_candidates.nth(i)
             try:
                 if await btn.is_visible():
                     await btn.click(timeout=2000)
                     self._log("Dismissed initial portal popup.", step="NAVIGATE")
-                    await self._wait_for_postback(page, delay=0.5)
+                    await self._wait_for_postback(page, delay=0.4)
                     return
             except Exception:
                 continue
@@ -176,91 +194,47 @@ class IGRPortalBot:
         except Exception:
             pass
 
-    async def _resolve_active_page(self, context: BrowserContext, current_page: Page) -> Page:
-        pages = [p for p in context.pages if not p.is_closed()]
-        if not pages:
-            return current_page
-        newest = pages[-1]
-        if newest != current_page:
-            newest.set_default_timeout(30000)
-            await self._wait_for_postback(newest, delay=0.8)
-            self._log(f"Switched to active page: {newest.url}", step="NAVIGATE")
-            return newest
-        return current_page
-
-    async def _click_if_present(self, context: BrowserContext, page: Page, selector: str, label: str) -> Page:
+    async def _click_and_wait(self, page: Page, selector: str, label: str, wait_selector: str | None = None):
         await self._wait_for_loading_to_finish(page)
         await self._dismiss_popup_if_present(page)
         loc = page.locator(selector).first
-        if await loc.count() > 0 and await loc.is_visible():
-            try:
-                async with context.expect_page(timeout=4000) as popup_info:
-                    await loc.click()
-                new_page = await popup_info.value
-                new_page.set_default_timeout(30000)
-                self._log(f"Clicked {label} (opened new tab)", step="NAVIGATE")
-                await self._wait_for_postback(new_page)
-                return new_page
-            except Exception:
-                self._log(f"Clicked {label}", step="NAVIGATE")
-                await self._wait_for_postback(page)
-                return await self._resolve_active_page(context, page)
-        return page
-
-    async def _get_district_locator(self, page: Page):
-        loc = page.locator(SELECTORS["district_select"]).first
         if await loc.count() == 0:
-            loc = page.locator("select[id*='District' i], select[name*='District' i]").first
-        return loc
+            self._log(f"Control '{label}' ({selector}) not found.", level="WARNING", step="NAVIGATE")
+            return False
+        await loc.click(timeout=15000)
+        self._log(f"Clicked {label}.", step="NAVIGATE")
+        await self._wait_for_postback(page, wait_selector=wait_selector, delay=0.6)
+        return True
 
-    async def _list_all_district_options(self, page: Page) -> list[dict[str, str]]:
-        loc = await self._get_district_locator(page)
-        if await loc.count() == 0:
-            return []
-        options = await loc.evaluate(
-            """(selectEl) => {
-                const items = [];
-                for (const opt of selectEl.options) {
-                    const text = (opt.text || '').trim();
-                    const value = (opt.value || '').trim();
-                    if (!value || value === '0' || value === '-1' || text.startsWith('---') || text.toLowerCase().includes('select district')) {
-                        continue;
-                    }
-                    items.append({ value, text });
-                }
-                return items;
-            }"""
-        )
-        return options or []
-
-    async def _select_option_if_present(
+    async def _select_option(
         self,
         page: Page,
-        primary_selector: str,
-        value: str | None,
+        selector: str,
+        value: str | int | None,
         label: str,
-        fallback_selector: str | None = None,
-    ):
-        if not value:
-            return
+        dependent_selector: str | None = None,
+    ) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
         await self._wait_for_loading_to_finish(page)
-        loc = page.locator(primary_selector).first
-        if await loc.count() == 0 and fallback_selector:
-            loc = page.locator(fallback_selector).first
-        if await loc.count() == 0:
-            self._log(f"Dropdown '{label}' ({primary_selector}) not found; skipping.", level="WARNING", step="FORM")
-            return
+        loc = page.locator(selector).first
+        if await loc.count() == 0 or not await loc.is_visible():
+            self._log(f"Dropdown '{label}' ({selector}) not visible; skipping.", level="WARNING", step="FORM")
+            return None
 
         target_str = str(value).strip()
         alias_target = DISTRICT_ALIASES.get(target_str.lower())
 
+        selected_text = None
         try:
             await loc.select_option(label=target_str)
+            selected_text = target_str
         except Exception:
             try:
                 await loc.select_option(value=target_str)
+                selected_text = target_str
             except Exception:
-                matched_value = await loc.evaluate(
+                matched = await loc.evaluate(
                     """(selectEl, args) => {
                         const [raw, alias] = args;
                         const normRaw = raw.toLowerCase();
@@ -268,368 +242,584 @@ class IGRPortalBot:
                         for (const opt of selectEl.options) {
                             const txt = (opt.text || '').trim();
                             const val = (opt.value || '').trim();
-                            if (!val || val === '0' || txt.startsWith('---')) continue;
+                            if (!val || val === '0' || val === '-1' || txt.startsWith('---')) continue;
                             if (
                                 txt.toLowerCase() === normRaw ||
                                 val.toLowerCase() === normRaw ||
                                 (normAlias && (txt.toLowerCase().includes(normAlias) || txt.includes(alias))) ||
                                 txt.toLowerCase().includes(normRaw)
                             ) {
-                                return opt.value;
+                                return { value: opt.value, text: txt };
                             }
                         }
                         return null;
                     }""",
                     [target_str, alias_target],
                 )
-                if matched_value:
-                    await loc.select_option(value=matched_value)
+                if matched:
+                    await loc.select_option(value=matched["value"])
+                    selected_text = matched["text"]
                 else:
                     self._log(
-                        f"Could not match option '{target_str}' in '{label}' dropdown; skipping.",
+                        f"Could not match '{target_str}' in '{label}'; skipping.",
                         level="WARNING",
                         step="FORM",
                     )
-                    return
+                    return None
 
-        self._log(f"Selected {label}: {target_str}", step="FORM")
-        await self._wait_for_postback(page)
+        self._log(f"Selected {label}: {selected_text}", step="FORM")
+        await self._wait_for_postback(
+            page,
+            wait_selector=dependent_selector,
+            min_options=2 if dependent_selector else None,
+            delay=0.5,
+        )
+        return selected_text
 
-    async def _fill_if_present(
-        self,
-        page: Page,
-        primary_selector: str,
-        value: str | None,
-        label: str,
-        fallback_selector: str | None = None,
-    ):
-        if not value:
+    async def _fill_input(self, page: Page, selector: str, value: str | None, label: str, trigger_postback: bool = False):
+        if value is None or str(value).strip() == "":
             return
         await self._wait_for_loading_to_finish(page)
-        loc = page.locator(primary_selector).first
-        if await loc.count() == 0 and fallback_selector:
-            loc = page.locator(fallback_selector).first
-        if await loc.count() == 0:
-            self._log(f"Input '{label}' ({primary_selector}) not found; skipping.", level="WARNING", step="FORM")
+        loc = page.locator(selector).first
+        if await loc.count() == 0 or not await loc.is_visible():
+            self._log(f"Input '{label}' ({selector}) not visible; skipping.", level="WARNING", step="FORM")
             return
-        await loc.fill(str(value))
-        self._log(f"Entered {label}: {value}", step="FORM")
-
-    async def _is_blank_png(self, png_bytes: bytes) -> bool:
-        return len(png_bytes) < 500
+        text_val = str(value).strip()
+        await loc.fill(text_val)
+        self._log(f"Entered {label}: {text_val}", step="FORM")
+        if trigger_postback:
+            await loc.press("Tab")
 
     async def _capture_captcha_bytes(self, page: Page, img_loc) -> bytes:
         await self._wait_for_loading_to_finish(page, max_wait=15.0)
-
         for _ in range(12):
             try:
                 ready = await img_loc.evaluate(
-                    """(el) => {
-                        if (el.tagName && el.tagName.toLowerCase() === 'img') {
-                            return Boolean(el.complete && el.naturalWidth > 0);
-                        }
-                        return true;
-                    }"""
+                    "(el) => el.tagName.toLowerCase() === 'img' ? Boolean(el.complete && el.naturalWidth > 0) : true"
                 )
                 if ready:
                     break
             except Exception:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.4)
 
         try:
-            await img_loc.scroll_into_view_if_needed(timeout=4000)
+            await img_loc.scroll_into_view_if_needed(timeout=3000)
         except Exception:
             pass
-        await asyncio.sleep(1.0)
-
-        try:
-            debug_path = self.storage_dir / f"captcha_debug_{self.job_id.hex[:8]}.png"
-            await page.screenshot(path=str(debug_path), full_page=False)
-        except Exception:
-            pass
+        await asyncio.sleep(0.5)
 
         try:
             shot = await img_loc.screenshot(timeout=5000)
-            if shot and not await self._is_blank_png(shot):
+            if shot and len(shot) >= 400:
                 return shot
-        except Exception:
-            pass
-
-        try:
-            box = await img_loc.bounding_box(timeout=3000)
-            if box and box["width"] > 0 and box["height"] > 0:
-                pad = 8
-                clip = {
-                    "x": max(0.0, box["x"] - pad),
-                    "y": max(0.0, box["y"] - pad),
-                    "width": box["width"] + pad * 2,
-                    "height": box["height"] + pad * 2,
-                }
-                return await page.screenshot(clip=clip, timeout=5000)
         except Exception:
             pass
 
         return await page.screenshot(full_page=False, timeout=5000)
 
-    async def _solve_captcha(self, page: Page):
-        img_loc = page.locator(SELECTORS["captcha_img"]).first
-        if await img_loc.count() == 0:
-            img_loc = page.locator("img[id*='Captcha' i], img[src*='Captcha' i]").first
+    async def _request_manual_captcha(self, page: Page, mode_cfg: dict) -> bool:
+        """Pause session and wait for manual CAPTCHA entry in dashboard (or visible browser)."""
+        img_loc = page.locator(mode_cfg["captcha_img"]).first
+        input_loc = page.locator(mode_cfg["captcha_input"]).first
 
-        input_loc = page.locator(SELECTORS["captcha_input"]).first
-        if await input_loc.count() == 0:
-            input_loc = page.locator("input[id*='Captcha' i][type='text'], input[placeholder*='captcha' i]").first
+        if await img_loc.count() == 0 or await input_loc.count() == 0 or not await img_loc.is_visible():
+            self._log("No visible CAPTCHA detected on active form; proceeding.", step="CAPTCHA")
+            return False
 
-        if await img_loc.count() == 0 or await input_loc.count() == 0:
-            self._log("No CAPTCHA element detected; proceeding to submit.", step="CAPTCHA")
-            return
-
-        is_vis = False
-        try:
-            is_vis = await img_loc.is_visible(timeout=4000)
-        except Exception:
-            is_vis = False
-
-        if not is_vis:
-            self._log("CAPTCHA image is not visible on this form state; proceeding to submit.", level="WARNING", step="CAPTCHA")
-            return
-
-        self._log("CAPTCHA detected. Capturing image for dashboard verification.", step="CAPTCHA")
+        self._log("CAPTCHA detected. Waiting for manual verification from dashboard.", step="CAPTCHA")
         img_bytes = await self._capture_captcha_bytes(page, img_loc)
         b64_img = base64.b64encode(img_bytes).decode("utf-8")
         self._set_status("AWAITING_CAPTCHA", captcha_b64=b64_img)
 
         solution = None
-        for _ in range(120):
+        for _ in range(200):  # up to 5 minutes
             await asyncio.sleep(1.5)
             db = SessionLocal()
             try:
                 job = db.query(SearchJob).filter(SearchJob.id == self.job_id).first()
-                if job and job.captcha_solution:
+                if not job:
+                    raise ValueError("SearchJob deleted while waiting for CAPTCHA.")
+                if job.cancel_requested:
+                    raise JobCancelledError("Job cancelled while awaiting CAPTCHA.")
+                if job.captcha_refresh_requested:
+                    job.captcha_refresh_requested = False
+                    db.commit()
+                    self._log("Refreshing CAPTCHA image on user request.", step="CAPTCHA")
+                    try:
+                        await img_loc.evaluate(
+                            """(el) => {
+                                const base = el.src.split('&r=')[0];
+                                el.src = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now();
+                            }"""
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.8)
+                    refreshed = await self._capture_captcha_bytes(page, img_loc)
+                    job.captcha_image_base64 = base64.b64encode(refreshed).decode("utf-8")
+                    db.commit()
+                    continue
+                if job.captcha_solution:
                     solution = job.captcha_solution.strip()
                     break
             finally:
                 db.close()
 
+            # Also check if user typed CAPTCHA directly in the visible Playwright browser
+            if not settings.headless:
+                try:
+                    typed = (await input_loc.input_value()).strip()
+                    if len(typed) >= 4:
+                        self._log("Detected manual CAPTCHA entry in visible browser.", step="CAPTCHA")
+                        solution = typed
+                        break
+                except Exception:
+                    pass
+
         if not solution:
-            raise TimeoutError("Timed out waiting for CAPTCHA solution from dashboard.")
+            raise TimeoutError("Timed out waiting for manual CAPTCHA verification.")
 
         await input_loc.fill(solution)
         self._set_status("PROCESSING", captcha_b64=None)
         self._log("CAPTCHA entered; submitting search.", step="CAPTCHA")
+        return True
 
-    async def _save_record_and_pdf(self, context: BrowserContext, index_page: Page, fallback_sro: str, fallback_year: int):
-        html_content = await index_page.content()
-        text_content = await index_page.inner_text("body")
+    async def _check_portal_error(self, page: Page) -> tuple[bool, str | None]:
+        """Inspect dialog or error labels after search submit. Returns (is_captcha_error, msg)."""
+        if self.last_dialog_message:
+            msg = self.last_dialog_message
+            self.last_dialog_message = None
+            is_captcha = "captcha" in msg.lower() or "code" in msg.lower() or "invalid" in msg.lower()
+            return is_captcha, msg
 
-        doc_match = re.search(r"(?:Document\s*(?:No\.?|Number)|दस्त\s*क्रमांक)\s*[:\-]?\s*([A-Za-z0-9/\-]+)", text_content, re.I)
-        sro_match = re.search(r"(?:SRO|Sub-?Registrar(?:\s*Office)?|दुय्यम\s*निबंधक)\s*[:\-]?\s*([^\n\r]+)", text_content, re.I)
+        err_loc = page.locator(COMMON_SELECTORS["error_labels"])
+        for i in range(await err_loc.count()):
+            el = err_loc.nth(i)
+            try:
+                if await el.is_visible():
+                    txt = (await el.inner_text()).strip()
+                    if txt:
+                        is_captcha = "captcha" in txt.lower() or "verification" in txt.lower()
+                        return is_captcha, txt
+            except Exception:
+                continue
+        return False, None
 
-        doc_number = doc_match.group(1).strip() if doc_match else f"DOC-{datetime.utcnow().strftime('%H%M%S%f')}"
-        sro_name = (sro_match.group(1).strip() if sro_match else fallback_sro)[:250]
+    def _resolve_mode_key(self, search_type: str, criteria: dict) -> str:
+        if search_type == "DOCUMENT":
+            return "DOCUMENT"
+        region = str(criteria.get("region") or "MUMBAI").upper()
+        if region == "REST":
+            return "PROPERTY_REST_OF_MH"
+        if region == "URBAN":
+            return "PROPERTY_URBAN"
+        return "PROPERTY_MUMBAI"
 
-        safe_doc = re.sub(r"[^A-Za-z0-9_\-]", "_", doc_number)
-        pdf_name = f"IndexII_{safe_doc}_{fallback_year}_{self.job_id.hex[:8]}.pdf"
-        pdf_path = self.storage_dir / pdf_name
+    async def _prepare_mode_and_fill(self, page: Page, search_type: str, criteria: dict) -> tuple[str, dict, str]:
+        mode_key = self._resolve_mode_key(search_type, criteria)
+        mode_cfg = MODE_SELECTORS[mode_key]
 
-        try:
-            await index_page.pdf(path=str(pdf_path), format="A4", print_background=True)
-        except Exception:
-            pdf_path = pdf_path.with_suffix(".html")
-            pdf_path.write_text(html_content, encoding="utf-8")
+        if search_type == "DOCUMENT":
+            await self._click_and_wait(
+                page,
+                COMMON_SELECTORS["tab_document"],
+                "Document Number Tab",
+                wait_selector=mode_cfg["district_select"],
+            )
+            doc_type = str(criteria.get("doc_type") or "Regular").strip().lower()
+            radio_sel = mode_cfg["doc_type_radios"].get(doc_type)
+            if radio_sel:
+                await self._click_and_wait(page, radio_sel, f"Document Type ({criteria.get('doc_type')})")
+
+            selected_dist = await self._select_option(
+                page,
+                mode_cfg["district_select"],
+                criteria.get("district"),
+                "District",
+                dependent_selector=mode_cfg["sro_select"],
+            )
+            selected_sro = await self._select_option(
+                page,
+                mode_cfg["sro_select"],
+                criteria.get("sro"),
+                "Sub-Registrar Office (SRO)",
+            )
+            await self._select_option(page, mode_cfg["year_select"], criteria.get("year"), "Year")
+            await self._fill_input(
+                page,
+                mode_cfg["document_input"],
+                criteria.get("document_number"),
+                "Document Number",
+            )
+            return mode_key, mode_cfg, (selected_sro or selected_dist or criteria.get("district") or "IGR Maharashtra")
+
+        # PROPERTY search mode
+        await self._click_and_wait(page, COMMON_SELECTORS["tab_property"], "Property Details Tab")
+        if mode_key == "PROPERTY_REST_OF_MH":
+            await self._click_and_wait(
+                page,
+                COMMON_SELECTORS["region_rest_of_mh"],
+                "Rest of Maharashtra",
+                wait_selector=mode_cfg["district_select"],
+            )
+        elif mode_key == "PROPERTY_URBAN":
+            await self._click_and_wait(
+                page,
+                COMMON_SELECTORS["region_urban"],
+                "Urban Areas in Rest of Maharashtra",
+                wait_selector=mode_cfg["district_select"],
+            )
+        else:
+            await self._click_and_wait(
+                page,
+                COMMON_SELECTORS["region_mumbai"],
+                "Mumbai",
+                wait_selector=mode_cfg["district_select"],
+            )
+
+        await self._select_option(page, mode_cfg["year_select"], criteria.get("year"), "Year")
+
+        if mode_key == "PROPERTY_MUMBAI":
+            selected_dist = await self._select_option(
+                page,
+                mode_cfg["district_select"],
+                criteria.get("district") or "Mumbai",
+                "District",
+            )
+            area_query = criteria.get("area_name") or criteria.get("village") or criteria.get("area")
+            if area_query:
+                await self._fill_input(page, mode_cfg["area_name_input"], str(area_query)[:20], "Village Search Text", trigger_postback=True)
+                await self._wait_for_postback(page, wait_selector=mode_cfg["village_select"], min_options=2, delay=0.5)
+            selected_village = await self._select_option(
+                page,
+                mode_cfg["village_select"],
+                criteria.get("village") or criteria.get("area") or criteria.get("area_name"),
+                "Area / Village",
+            )
+            prop_val = criteria.get("property_number") or criteria.get("attribute_value")
+            await self._fill_input(page, mode_cfg["property_input"], prop_val, "Property / Survey / CTS No.")
+            return mode_key, mode_cfg, (selected_village or selected_dist or "Mumbai")
+
+        # Rest of Maharashtra / Urban
+        selected_dist = await self._select_option(
+            page,
+            mode_cfg["district_select"],
+            criteria.get("district"),
+            "District",
+            dependent_selector=mode_cfg["tahsil_select"],
+        )
+        selected_tahsil = await self._select_option(
+            page,
+            mode_cfg["tahsil_select"],
+            criteria.get("tahsil"),
+            "Tahsil",
+            dependent_selector=mode_cfg["village_select"],
+        )
+        selected_village = await self._select_option(
+            page,
+            mode_cfg["village_select"],
+            criteria.get("village") or criteria.get("area"),
+            "Village",
+        )
+        prop_val = criteria.get("property_number") or criteria.get("attribute_value")
+        await self._fill_input(page, mode_cfg["property_input"], prop_val, "Property / Survey / CTS No.")
+        label = selected_village or selected_tahsil or selected_dist or criteria.get("district") or "IGR Maharashtra"
+        return mode_key, mode_cfg, label
+
+    async def _save_record(
+        self,
+        index_page: Page | None,
+        row_cells: list[str],
+        criteria: dict,
+        fallback_sro: str,
+        fallback_year: int,
+        downloaded_file: tuple[Path, str] | None = None,
+    ) -> bool:
+        html_content = ""
+        text_content = " | ".join(row_cells)
+        if index_page is not None:
+            try:
+                html_content = await index_page.content()
+                text_content = await index_page.inner_text("body")
+            except Exception:
+                pass
+
+        parsed = parse_index_ii_text(
+            text=text_content,
+            row_cells=row_cells,
+            fallback_sro=criteria.get("sro") or fallback_sro,
+            fallback_year=fallback_year,
+        )
+
+        # Optional client-side party name filter if user provided party_name
+        party_filter = (criteria.get("party_name") or "").strip().lower()
+        if party_filter:
+            searchable = f"{text_content} {' '.join(row_cells)}".lower()
+            if party_filter not in searchable:
+                self._log(
+                    f"Skipping document {parsed['document_number']} (does not match party filter '{criteria.get('party_name')}').",
+                    step="EXTRACT",
+                )
+                return False
+
+        safe_doc = re.sub(r"[^A-Za-z0-9_\-]", "_", parsed["document_number"])
+        saved_path: Path | None = None
+        mime_type = "application/pdf"
+
+        if downloaded_file is not None:
+            saved_path, mime_type = downloaded_file
+        elif index_page is not None:
+            pdf_name = f"IndexII_{safe_doc}_{parsed['registration_year']}_{self.job_id.hex[:8]}.pdf"
+            pdf_path = storage_service.build_path(pdf_name)
+            try:
+                await index_page.pdf(path=str(pdf_path), format="A4", print_background=True)
+                saved_path = pdf_path
+                mime_type = "application/pdf"
+            except Exception:
+                html_name = f"IndexII_{safe_doc}_{parsed['registration_year']}_{self.job_id.hex[:8]}.html"
+                saved_path = storage_service.save_text(html_name, html_content)
+                mime_type = "text/html"
 
         db = SessionLocal()
         try:
             record = (
                 db.query(PropertyRecord)
                 .filter(
-                    PropertyRecord.sro_name == sro_name,
-                    PropertyRecord.document_number == doc_number,
-                    PropertyRecord.registration_year == fallback_year,
+                    PropertyRecord.sro_name == parsed["sro_name"],
+                    PropertyRecord.document_number == parsed["document_number"],
+                    PropertyRecord.registration_year == parsed["registration_year"],
                 )
                 .first()
             )
+            district_val = criteria.get("district")
+            tahsil_or_village = criteria.get("village") or criteria.get("area") or criteria.get("tahsil")
             if not record:
                 record = PropertyRecord(
-                    sro_name=sro_name,
-                    document_number=doc_number,
-                    registration_year=fallback_year,
-                    property_details=text_content[:4000],
-                    raw_html_snapshot=html_content[:50000],
+                    district=str(district_val)[:150] if district_val else None,
+                    tahsil_or_village=str(tahsil_or_village)[:255] if tahsil_or_village else None,
+                    sro_name=parsed["sro_name"],
+                    document_number=parsed["document_number"],
+                    registration_year=parsed["registration_year"],
+                    registration_date=parsed["registration_date"],
+                    article_type=parsed["article_type"],
+                    consideration_amount=parsed["consideration_amount"],
+                    market_value=parsed["market_value"],
+                    party_details=parsed["party_details"],
+                    property_details=parsed["property_details"],
+                    survey_cts_number=parsed["survey_cts_number"],
+                    raw_html_snapshot=html_content[:50000] if html_content else None,
                 )
                 db.add(record)
                 db.flush()
+            else:
+                # Enrich existing record if fields were previously missing
+                for attr in (
+                    "registration_date",
+                    "article_type",
+                    "consideration_amount",
+                    "market_value",
+                    "party_details",
+                    "survey_cts_number",
+                ):
+                    if getattr(record, attr) is None and parsed[attr] is not None:
+                        setattr(record, attr, parsed[attr])
 
             job = db.query(SearchJob).filter(SearchJob.id == self.job_id).first()
             if job and record not in job.records:
                 job.records.append(record)
 
-            file_size = pdf_path.stat().st_size if pdf_path.exists() else None
-            mime = "application/pdf" if pdf_path.suffix == ".pdf" else "text/html"
-            doc_file = DocumentFile(
-                record_id=record.id,
-                file_name=pdf_path.name,
-                file_path=str(pdf_path),
-                mime_type=mime,
-                file_size_bytes=file_size,
-            )
-            db.add(doc_file)
+            if saved_path and saved_path.exists():
+                doc_file = DocumentFile(
+                    record_id=record.id,
+                    file_name=saved_path.name,
+                    file_path=str(saved_path),
+                    mime_type=mime_type,
+                    file_size_bytes=saved_path.stat().st_size,
+                )
+                db.add(doc_file)
+
             db.commit()
-            self._log(f"Saved record {doc_number} ({sro_name}) and document {pdf_path.name}.", step="EXTRACT")
+            self._log(
+                f"Saved record {parsed['document_number']} ({parsed['sro_name']})"
+                + (f" with document {saved_path.name}" if saved_path else "."),
+                step="EXTRACT",
+            )
+            return True
         finally:
             db.close()
 
-    async def _extract_results(self, context: BrowserContext, page: Page, criteria: dict, district_label: str | None = None) -> int:
-        fallback_sro = district_label or criteria.get("sro") or criteria.get("district") or "IGR Maharashtra"
+    async def _open_and_extract_row(
+        self,
+        context: BrowserContext,
+        page: Page,
+        row_index: int,
+        row_cells: list[str],
+        criteria: dict,
+        fallback_sro: str,
+        fallback_year: int,
+    ) -> bool:
+        rows = page.locator(COMMON_SELECTORS["results_rows"])
+        row = rows.nth(row_index)
+        link = row.locator(COMMON_SELECTORS["index_ii_link"]).first
+        if await link.count() == 0:
+            return False
+
+        existing_pages = set(context.pages)
+        downloaded_file: tuple[Path, str] | None = None
+        popup_page: Page | None = None
+
+        # Listen safely for download OR new tab OR same-page navigation
+        download_task = asyncio.create_task(page.wait_for_event("download", timeout=6000))
+        page_task = asyncio.create_task(context.wait_for_event("page", timeout=6000))
+        try:
+            await link.click(timeout=10000)
+            done, pending = await asyncio.wait(
+                {download_task, page_task},
+                timeout=6.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            if download_task in done and not download_task.exception():
+                dl = download_task.result()
+                fname = dl.suggested_filename or f"IndexII_{self.job_id.hex[:8]}.pdf"
+                dest = storage_service.build_path(fname)
+                await dl.save_as(str(dest))
+                mime = "application/pdf" if dest.suffix.lower() == ".pdf" else "application/octet-stream"
+                downloaded_file = (dest, mime)
+            elif page_task in done and not page_task.exception():
+                popup_page = page_task.result()
+        finally:
+            for t in (download_task, page_task):
+                if not t.done():
+                    t.cancel()
+
+        if popup_page is None:
+            new_pages = [p for p in context.pages if p not in existing_pages and not p.is_closed()]
+            if new_pages:
+                popup_page = new_pages[-1]
+
+        if downloaded_file is not None:
+            return await self._save_record(None, row_cells, criteria, fallback_sro, fallback_year, downloaded_file=downloaded_file)
+
+        if popup_page is not None:
+            popup_page.set_default_timeout(30000)
+            await self._wait_for_postback(popup_page, delay=0.5)
+            try:
+                return await self._save_record(popup_page, row_cells, criteria, fallback_sro, fallback_year)
+            finally:
+                if not popup_page.is_closed():
+                    await popup_page.close()
+
+        # Fallback: check if same-page navigation or inline detail modal opened
+        await self._wait_for_postback(page, delay=0.5)
+        return await self._save_record(page, row_cells, criteria, fallback_sro, fallback_year)
+
+    async def _extract_results(self, context: BrowserContext, page: Page, criteria: dict, fallback_sro: str) -> int:
         try:
             fallback_year = int(criteria.get("year") or datetime.utcnow().year)
         except ValueError:
             fallback_year = datetime.utcnow().year
 
+        table = page.locator(COMMON_SELECTORS["results_table"]).first
+        if await table.count() == 0 or not await table.is_visible():
+            self._log("No results table rendered for search criteria.", level="WARNING", step="RESULTS")
+            return 0
+
         page_num = 1
-        total_processed = 0
+        total_saved = 0
 
         while True:
+            self._check_cancelled()
             self._log(f"Scanning search results page {page_num} ({fallback_sro}).", step="RESULTS")
-            rows = page.locator(SELECTORS["results_rows"])
+            rows = page.locator(COMMON_SELECTORS["results_rows"])
             row_count = await rows.count()
 
             for i in range(row_count):
+                self._check_cancelled()
                 row = rows.nth(i)
-                link = row.locator(SELECTORS["index_ii_link"]).first
-                if await link.count() == 0:
+                if await row.locator(COMMON_SELECTORS["index_ii_link"]).count() == 0:
                     continue
-
-                async with context.expect_page(timeout=8000) as popup_info:
-                    await link.click()
-                    try:
-                        popup = await popup_info.value
-                    except Exception:
-                        popup = None
-
-                target_page = popup if popup else page
-                await self._wait_for_postback(target_page, delay=0.6)
-                await self._save_record_and_pdf(context, target_page, fallback_sro, fallback_year)
-                total_processed += 1
-
-                if popup and not popup.is_closed():
-                    await popup.close()
+                row_cells = await row.locator("td").all_inner_texts()
+                if await self._open_and_extract_row(context, page, i, row_cells, criteria, fallback_sro, fallback_year):
+                    total_saved += 1
 
             next_pager = page.locator(f"a[href*='Page${page_num + 1}']").first
             if await next_pager.count() == 0:
                 break
             page_num += 1
             await next_pager.click()
-            await self._wait_for_postback(page)
+            await self._wait_for_postback(page, delay=0.8)
 
-        self._log(f"Saved {total_processed} Index-II record(s) for {fallback_sro}.", step="EXTRACT")
-        return total_processed
-
-    async def _submit_and_extract_for_district(self, context: BrowserContext, page: Page, criteria: dict, district_label: str | None = None) -> int:
-        await self._select_option_if_present(
-            page,
-            SELECTORS["area_select"],
-            criteria.get("area"),
-            "Area / Village",
-            fallback_selector="select[id*='Village' i], select[id*='Area' i]",
-        )
-        await self._fill_if_present(
-            page,
-            SELECTORS["area_name_input"],
-            criteria.get("area_name"),
-            "Area Name",
-            fallback_selector="input[id*='Village' i], input[id*='Area' i]",
-        )
-        await self._fill_if_present(
-            page,
-            SELECTORS["attribute_value_input"],
-            criteria.get("attribute_value") or criteria.get("property_number") or criteria.get("document_number"),
-            "Search Value",
-            fallback_selector="input[id*='Property' i], input[id*='Attribute' i], input[id*='Doc' i]",
-        )
-
-        await self._solve_captcha(page)
-
-        await self._wait_for_loading_to_finish(page)
-        submit_btn = page.locator(SELECTORS["search_btn"]).first
-        if await submit_btn.count() == 0:
-            submit_btn = page.locator("input[type='submit'][value*='Search' i], input[type='submit'][value*='शोध' i], input[id*='Search' i]").first
-        await submit_btn.click(timeout=15000)
-        self._log(f"Submitted search form ({district_label or 'default'}). Waiting for results.", step="SEARCH")
-        await self._wait_for_postback(page, delay=1.5)
-
-        return await self._extract_results(context, page, criteria, district_label=district_label)
+        self._log(f"Saved {total_saved} Index-II record(s) for {fallback_sro}.", step="EXTRACT")
+        return total_saved
 
     async def run(self):
-        self._set_status("PROCESSING", error=None)
+        self._set_status("PROCESSING", error=None, portal_notice=None)
         self._log("Launching Playwright Chromium browser.", step="INIT")
-        search_type, criteria, _ = self._get_job_snapshot()
+        search_type, criteria, cancelled = self._get_job_snapshot()
+        if cancelled:
+            self._set_status("CANCELLED")
+            return
 
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=settings.headless)
-                context = await browser.new_context()
+                context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 page.set_default_timeout(30000)
+                self._attach_dialog_handler(page)
 
                 await self._goto_with_retry(page, settings.igr_portal_url, attempts=3)
-                await self._wait_for_postback(page)
+                await self._wait_for_postback(page, delay=0.8)
                 await self._dismiss_popup_if_present(page)
 
-                region = criteria.get("region")
-                if region == "MUMBAI":
-                    page = await self._click_if_present(context, page, SELECTORS["region_mumbai"], "Mumbai Search")
-                elif region == "URBAN":
-                    page = await self._click_if_present(context, page, SELECTORS["region_urban"], "Urban Areas Search")
-                elif region == "REST":
-                    page = await self._click_if_present(context, page, SELECTORS["region_rest_of_mh"], "Rest of Maharashtra Search")
+                _, mode_cfg, label = await self._prepare_mode_and_fill(page, search_type, criteria)
 
-                page = await self._resolve_active_page(context, page)
+                # Up to 3 CAPTCHA verification attempts in the same live session
+                submitted_ok = False
+                for attempt in range(1, 4):
+                    self._check_cancelled()
+                    await self._request_manual_captcha(page, mode_cfg)
+                    await self._wait_for_loading_to_finish(page)
+                    self.last_dialog_message = None
 
-                await self._select_option_if_present(
-                    page,
-                    SELECTORS["year_select"],
-                    criteria.get("year"),
-                    "Year",
-                    fallback_selector="select[id*='Year' i], select[name*='Year' i]",
-                )
+                    submit_btn = page.locator(mode_cfg["search_btn"]).first
+                    await submit_btn.click(timeout=15000)
+                    self._log(f"Submitted search (attempt {attempt}/3). Waiting for results.", step="SEARCH")
+                    await self._wait_for_postback(page, delay=1.2)
 
-                raw_district = criteria.get("district")
-                scan_all_districts = bool(criteria.get("all_districts")) or (
-                    isinstance(raw_district, str) and raw_district.strip().lower() in {"all", "*", "all districts"}
-                )
-
-                total_records = 0
-                if scan_all_districts:
-                    district_options = await self._list_all_district_options(page)
-                    self._log(f"Scanning across all {len(district_options)} districts.", step="FORM")
-                    for idx, opt in enumerate(district_options, start=1):
-                        d_text = opt["text"]
-                        d_val = opt["value"]
-                        self._log(f"[{idx}/{len(district_options)}] Selecting District: {d_text}", step="FORM")
-                        await self._select_option_if_present(
-                            page,
-                            SELECTORS["district_select"],
-                            d_val,
-                            f"District ({d_text})",
-                            fallback_selector="select[id*='District' i], select[name*='District' i]",
+                    is_captcha_err, portal_msg = await self._check_portal_error(page)
+                    if is_captcha_err:
+                        self._log(
+                            f"Portal rejected CAPTCHA ({portal_msg}). Prompting user to retry.",
+                            level="WARNING",
+                            step="CAPTCHA",
                         )
-                        total_records += await self._submit_and_extract_for_district(context, page, criteria, district_label=d_text)
-                else:
-                    await self._select_option_if_present(
-                        page,
-                        SELECTORS["district_select"],
-                        raw_district,
-                        "District",
-                        fallback_selector="select[id*='District' i], select[name*='District' i]",
+                        continue
+                    if portal_msg:
+                        self._set_status("PROCESSING", portal_notice=portal_msg)
+                        self._log(f"Portal message: {portal_msg}", level="INFO", step="RESULTS")
+                    submitted_ok = True
+                    break
+
+                if not submitted_ok:
+                    raise ValueError("CAPTCHA verification failed after 3 attempts.")
+
+                total_records = await self._extract_results(context, page, criteria, fallback_sro=label)
+                if total_records == 0:
+                    self._set_status(
+                        "COMPLETED",
+                        portal_notice="Search completed cleanly, but no matching records were returned by the portal.",
                     )
-                    total_records += await self._submit_and_extract_for_district(context, page, criteria, district_label=raw_district)
-
-                self._log(f"Finished extraction. Total Index-II records saved: {total_records}.", step="COMPLETE")
+                else:
+                    self._set_status("COMPLETED")
+                self._log(f"Finished job. Total records saved: {total_records}.", step="COMPLETE")
                 await browser.close()
-
-            self._set_status("COMPLETED")
+        except JobCancelledError as exc:
+            self._log(str(exc), level="WARNING", step="CANCELLED")
+            self._set_status("CANCELLED", error=str(exc))
         except Exception as exc:
             err_msg = f"{type(exc).__name__}: {exc}"
             self._log(err_msg, level="ERROR", step="FAILED")

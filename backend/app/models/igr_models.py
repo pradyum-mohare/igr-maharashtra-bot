@@ -1,7 +1,17 @@
 import uuid
 from sqlalchemy import (
-    Column, String, Text, Integer, BigInteger, Date, DateTime,
-    Numeric, ForeignKey, UniqueConstraint, func
+    Boolean,
+    Column,
+    String,
+    Text,
+    Integer,
+    BigInteger,
+    Date,
+    DateTime,
+    Numeric,
+    ForeignKey,
+    UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -21,15 +31,27 @@ class SearchJob(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     search_type = Column(String(50), nullable=False)  # PROPERTY | DOCUMENT
     criteria = Column(JSONB, nullable=False)
-    status = Column(String(30), nullable=False, default="PENDING")  # PENDING | PROCESSING | AWAITING_CAPTCHA | COMPLETED | FAILED
+    status = Column(
+        String(30),
+        nullable=False,
+        default="PENDING",
+    )  # PENDING | PROCESSING | AWAITING_CAPTCHA | COMPLETED | FAILED | CANCELLED
     captcha_image_base64 = Column(Text, nullable=True)
     captcha_solution = Column(String(30), nullable=True)
+    captcha_refresh_requested = Column(Boolean, nullable=False, default=False)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    portal_notice = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    logs = relationship("AutomationLog", back_populates="job", cascade="all, delete-orphan", order_by="AutomationLog.id")
+    logs = relationship(
+        "AutomationLog",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="AutomationLog.id",
+    )
     records = relationship("PropertyRecord", secondary="job_records", back_populates="jobs")
 
 
@@ -40,6 +62,8 @@ class PropertyRecord(Base):
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    district = Column(String(150), nullable=True)
+    tahsil_or_village = Column(String(255), nullable=True)
     sro_name = Column(String(255), nullable=False)
     document_number = Column(String(100), nullable=False)
     registration_year = Column(Integer, nullable=False)
