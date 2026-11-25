@@ -96,7 +96,8 @@ class IGRPortalBot:
             try:
                 self._log(f"Navigating to {url} (attempt {attempt}/{attempts})...", step="NAVIGATE")
                 await page.goto(url, wait_until="commit", timeout=90000)
-                await page.wait_for_selector("body", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await page.wait_for_selector("#mnuSearchType, #btnMumbaisearch, #ddlDistrict", timeout=45000)
                 return
             except Exception as exc:
                 last_exc = exc
