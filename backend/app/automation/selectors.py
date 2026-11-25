@@ -11,7 +11,7 @@ COMMON_SELECTORS = {
     "region_urban": "#btnUrbansearch",
     "results_table": "table[id*='RegistrationGrid'], table[id*='Grid']",
     "results_rows": "table[id*='RegistrationGrid'] tr, table[id*='Grid'] tr",
-    "index_ii_link": "input[value*='Index' i], a:has-text('Index'), input[id*='Index' i], button:has-text('Index')",
+    "index_ii_link": "input[value*='Index' i], a:has-text('Index'), input[id*='Index' i], button:has-text('Index'), input[value*='सूची'], a:has-text('सूची'), a:has-text('View'), input[value*='View' i]",
     "error_labels": "span[id*='lblMsg' i], span[id*='lblError' i], span[id*='lblNoRecord' i], #lblMessage",
 }
 

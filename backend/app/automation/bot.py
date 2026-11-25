@@ -792,14 +792,24 @@ class IGRPortalBot:
                 submitted_ok = False
                 for attempt in range(1, 4):
                     self._check_cancelled()
+                    if attempt > 1:
+                        # Portal resets cascading selects like #ddlSROName after a failed CAPTCHA submit
+                        if search_type == "DOCUMENT" and criteria.get("sro"):
+                            sro_loc = page.locator(mode_cfg["sro_select"]).first
+                            try:
+                                cur_sro = (await sro_loc.input_value()).strip()
+                                if not cur_sro or cur_sro == "0" or cur_sro.startswith("---"):
+                                    await self._select_option(page, mode_cfg["sro_select"], criteria.get("sro"), "Sub-Registrar Office (SRO)")
+                            except Exception:
+                                pass
                     await self._request_manual_captcha(page, mode_cfg)
                     await self._wait_for_loading_to_finish(page)
                     self.last_dialog_message = None
 
                     submit_btn = page.locator(mode_cfg["search_btn"]).first
-                    await submit_btn.click(timeout=15000)
+                    await submit_btn.click(timeout=30000, no_wait_after=True)
                     self._log(f"Submitted search (attempt {attempt}/3). Waiting for results.", step="SEARCH")
-                    await self._wait_for_postback(page, delay=1.2)
+                    await self._wait_for_postback(page, delay=1.5)
 
                     is_captcha_err, portal_msg = await self._check_portal_error(page)
                     if is_captcha_err:
