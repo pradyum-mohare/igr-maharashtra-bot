@@ -225,7 +225,7 @@ class IGRPortalBot:
 
         target_str = str(value).strip()
         options = await loc.evaluate(
-            "(el) => Array.from(el.options).map(o => ({ value: (o.value || '').trim(), text: (o.text || '').trim() }))"
+            "(el) => Array.from(el.options).map(o => ({ value: o.value ?? '', text: (o.text || '').trim() }))"
         )
         matched = match_dropdown_option(options or [], target_str)
         if not matched:
@@ -296,9 +296,20 @@ class IGRPortalBot:
         img_loc = page.locator(mode_cfg["captcha_img"]).first
         input_loc = page.locator(mode_cfg["captcha_input"]).first
 
+        try:
+            await img_loc.wait_for(state="visible", timeout=10000)
+        except Exception:
+            pass
+
         if await img_loc.count() == 0 or await input_loc.count() == 0 or not await img_loc.is_visible():
             self._log("No visible CAPTCHA detected on active form; proceeding.", step="CAPTCHA")
             return False
+
+        # Clear any stale previous CAPTCHA attempt text
+        try:
+            await input_loc.fill("")
+        except Exception:
+            pass
 
         self._log("CAPTCHA detected. Waiting for manual verification from dashboard.", step="CAPTCHA")
         img_bytes = await self._capture_captcha_bytes(page, img_loc)
@@ -797,6 +808,9 @@ class IGRPortalBot:
                         )
                         continue
                     if portal_msg:
+                        low_msg = portal_msg.lower()
+                        if low_msg.startswith("select ") or "please select" in low_msg or "please enter" in low_msg:
+                            raise ValueError(f"Portal validation error: {portal_msg}")
                         self._set_status("PROCESSING", portal_notice=portal_msg)
                         self._log(f"Portal message: {portal_msg}", level="INFO", step="RESULTS")
                     submitted_ok = True

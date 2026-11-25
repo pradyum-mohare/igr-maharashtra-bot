@@ -185,8 +185,7 @@ def match_dropdown_option(options: list[dict[str, str]], query: str) -> dict[str
 
     valid = [
         opt for opt in options
-        if opt.get("value")
-        and opt["value"] not in {"0", "-1"}
+        if (opt.get("value") or "").strip() not in {"", "0", "-1"}
         and not opt.get("text", "").strip().startswith("---")
     ]
 

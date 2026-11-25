@@ -69,12 +69,12 @@ export function SearchForm({ districts, onSubmit }: SearchFormProps) {
       }
       criteria.property_number = propertyNumber.trim();
     } else {
-      if (!district.trim() || !documentNumber.trim()) {
-        setError("District and Document Number are required for Document Number search.");
+      if (!district.trim() || !sro.trim() || !documentNumber.trim()) {
+        setError("District, Sub-Registrar Office (SRO), and Document Number are required for Document Number search.");
         return;
       }
       criteria.doc_type = docType;
-      criteria.sro = sro.trim() || undefined;
+      criteria.sro = sro.trim();
       criteria.document_number = documentNumber.trim();
     }
 
@@ -286,7 +286,7 @@ export function SearchForm({ districts, onSubmit }: SearchFormProps) {
                 type="text"
                 value={sro}
                 onChange={(e) => setSro(e.target.value)}
-                placeholder="e.g., Haveli 1 (leave blank for first match)"
+                placeholder="e.g., Joint S.R. Haveli 5 or Haveli 5 (Pimpri)"
                 className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
               />
             </div>
