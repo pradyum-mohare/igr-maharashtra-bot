@@ -238,19 +238,42 @@ class IGRPortalBot:
                 matched = await loc.evaluate(
                     """(selectEl, args) => {
                         const [raw, alias] = args;
-                        const normRaw = raw.toLowerCase();
-                        const normAlias = (alias || '').toLowerCase();
-                        for (const opt of selectEl.options) {
+                        const normRaw = raw.toLowerCase().trim();
+                        const normAlias = (alias || '').toLowerCase().trim();
+                        const stripped = normRaw.replace(/\\([^)]*\\)/g, ' ').replace(/\\s+/g, ' ').trim();
+                        const tokens = stripped.split(/[^a-z0-9\\u0900-\\u097f]+/).filter(Boolean);
+                        const validOpts = Array.from(selectEl.options).filter(opt => {
                             const txt = (opt.text || '').trim();
                             const val = (opt.value || '').trim();
-                            if (!val || val === '0' || val === '-1' || txt.startsWith('---')) continue;
+                            return val && val !== '0' && val !== '-1' && !txt.startsWith('---');
+                        });
+
+                        for (const opt of validOpts) {
+                            const txt = opt.text.trim();
+                            const low = txt.toLowerCase();
+                            const val = opt.value.trim().toLowerCase();
+                            if (low === normRaw || val === normRaw || (normAlias && low === normAlias)) {
+                                return { value: opt.value, text: txt };
+                            }
+                        }
+                        for (const opt of validOpts) {
+                            const txt = opt.text.trim();
+                            const low = txt.toLowerCase();
                             if (
-                                txt.toLowerCase() === normRaw ||
-                                val.toLowerCase() === normRaw ||
-                                (normAlias && (txt.toLowerCase().includes(normAlias) || txt.includes(alias))) ||
-                                txt.toLowerCase().includes(normRaw)
+                                (normAlias && (low.includes(normAlias) || txt.includes(alias))) ||
+                                low.includes(normRaw) ||
+                                (stripped && low.includes(stripped))
                             ) {
                                 return { value: opt.value, text: txt };
+                            }
+                        }
+                        if (tokens.length > 0) {
+                            for (const opt of validOpts) {
+                                const txt = opt.text.trim();
+                                const optTokens = txt.toLowerCase().split(/[^a-z0-9\\u0900-\\u097f]+/).filter(Boolean);
+                                if (tokens.every(t => optTokens.includes(t))) {
+                                    return { value: opt.value, text: txt };
+                                }
                             }
                         }
                         return null;
@@ -453,7 +476,9 @@ class IGRPortalBot:
             doc_type = str(criteria.get("doc_type") or "Regular").strip().lower()
             radio_sel = mode_cfg["doc_type_radios"].get(doc_type)
             if radio_sel:
-                await self._click_and_wait(page, radio_sel, f"Document Type ({criteria.get('doc_type')})")
+                radio_loc = page.locator(radio_sel).first
+                if await radio_loc.count() > 0 and not await radio_loc.is_checked():
+                    await self._click_and_wait(page, radio_sel, f"Document Type ({criteria.get('doc_type')})")
 
             selected_dist = await self._select_option(
                 page,
