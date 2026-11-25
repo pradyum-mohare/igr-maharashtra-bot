@@ -404,6 +404,28 @@ class IGRPortalBot:
                         return is_captcha, txt
             except Exception:
                 continue
+
+        try:
+            inline_err = await page.evaluate(
+                """() => {
+                    const els = document.querySelectorAll('span, div, td, p');
+                    for (const el of els) {
+                        const txt = (el.innerText || '').trim();
+                        if (!txt || txt.length > 140) continue;
+                        const low = txt.toLowerCase();
+                        if (low.includes('entered captcha is incorrect') || low.includes('invalid captcha') || low.includes('no record found')) {
+                            const st = window.getComputedStyle(el);
+                            if (st.display !== 'none' && st.visibility !== 'hidden') return txt;
+                        }
+                    }
+                    return null;
+                }"""
+            )
+            if inline_err:
+                return ("captcha" in inline_err.lower()), inline_err
+        except Exception:
+            pass
+
         return False, None
 
     def _resolve_mode_key(self, search_type: str, criteria: dict) -> str:
