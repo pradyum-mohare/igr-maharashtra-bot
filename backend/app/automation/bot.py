@@ -317,7 +317,7 @@ class IGRPortalBot:
         self._set_status("AWAITING_CAPTCHA", captcha_b64=b64_img)
 
         solution = None
-        for _ in range(200):  # up to 5 minutes
+        for _ in range(600):  # up to 15 minutes
             await asyncio.sleep(1.5)
             db = SessionLocal()
             try:
