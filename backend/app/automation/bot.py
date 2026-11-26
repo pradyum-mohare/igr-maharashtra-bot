@@ -111,11 +111,12 @@ class IGRPortalBot:
         raise last_exc
 
     async def _arm_prm_listener(self, page: Page):
-        """Attach a one-shot ASP.NET PageRequestManager endRequest listener before submitting."""
+        """Attach ASP.NET PageRequestManager and UpdatePanel mutation listeners before submitting."""
         try:
             await page.evaluate(
                 """() => {
                     window.__igrEndRequest = false;
+                    window.__igrPanelMutated = false;
                     window.__igrPostbackError = null;
                     if (window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager) {
                         const prm = Sys.WebForms.PageRequestManager.getInstance();
@@ -129,13 +130,21 @@ class IGRPortalBot:
                             });
                         }
                     }
+                    const panel = document.querySelector('#UpdatePanel1') || document.body;
+                    if (window.__igrObserver) {
+                        try { window.__igrObserver.disconnect(); } catch (e) {}
+                    }
+                    window.__igrObserver = new MutationObserver(() => {
+                        window.__igrPanelMutated = true;
+                    });
+                    window.__igrObserver.observe(panel, { childList: true, subtree: true });
                 }"""
             )
         except Exception:
             pass
 
     async def _wait_for_prm_end(self, page: Page, timeout: float = 45.0):
-        """Wait until ASP.NET UpdatePanel async postback completes."""
+        """Wait until ASP.NET UpdatePanel async postback or DOM update completes."""
         await asyncio.sleep(0.5)
         elapsed = 0.0
         while elapsed < timeout:
@@ -158,20 +167,19 @@ class IGRPortalBot:
                         }
                         return {
                             endFired: Boolean(window.__igrEndRequest),
+                            mutated: Boolean(window.__igrPanelMutated),
                             inAsync,
                             loaderVisible,
                         };
                     }""",
                     COMMON_SELECTORS["update_progress"],
                 )
-                if state["endFired"] and not state["inAsync"] and not state["loaderVisible"]:
+                if (state["endFired"] or (elapsed >= 1.5 and state["mutated"])) and not state["inAsync"] and not state["loaderVisible"]:
                     await asyncio.sleep(0.6)
                     return
-                # If PRM isn't active and enough time passed with no loader, still check if results appeared
                 if elapsed >= 2.0 and not state["inAsync"] and not state["loaderVisible"] and await self._has_results_table(page):
                     return
             except Exception:
-                # Full page navigation may have occurred; wait for DOM ready
                 try:
                     await page.wait_for_load_state("domcontentloaded", timeout=15000)
                     return
@@ -447,17 +455,6 @@ class IGRPortalBot:
                     break
             finally:
                 db.close()
-
-            # Also check if user typed CAPTCHA directly in the visible Playwright browser
-            if not settings.headless:
-                try:
-                    typed = (await input_loc.input_value()).strip()
-                    if len(typed) >= 4:
-                        self._log("Detected manual CAPTCHA entry in visible browser.", step="CAPTCHA")
-                        solution = typed
-                        break
-                except Exception:
-                    pass
 
         if browser_submitted:
             self._set_status("PROCESSING", captcha_b64=None)
@@ -845,6 +842,16 @@ class IGRPortalBot:
             table_loc = page.locator("table:has(input[value*='Index' i]), table:has(a:has-text('Index')), table:has(input[value*='सूची'])").first
 
         if await table_loc.count() == 0 or not await table_loc.is_visible():
+            try:
+                visible_tables = await page.evaluate(
+                    """() => Array.from(document.querySelectorAll('table')).filter(t => {
+                        const r = t.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0 && t.querySelectorAll('tr').length >= 2;
+                    }).map(t => ({ id: t.id || '', rows: t.querySelectorAll('tr').length, sample: (t.innerText || '').slice(0, 120) }))"""
+                )
+                self._log(f"Visible tables snapshot: {visible_tables}", level="WARNING", step="RESULTS")
+            except Exception:
+                pass
             self._log("No results table rendered for search criteria.", level="WARNING", step="RESULTS")
             return 0
 
