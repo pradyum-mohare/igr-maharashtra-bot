@@ -110,6 +110,98 @@ class IGRPortalBot:
                     await asyncio.sleep(3.0)
         raise last_exc
 
+    async def _arm_prm_listener(self, page: Page):
+        """Attach a one-shot ASP.NET PageRequestManager endRequest listener before submitting."""
+        try:
+            await page.evaluate(
+                """() => {
+                    window.__igrEndRequest = false;
+                    window.__igrPostbackError = null;
+                    if (window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager) {
+                        const prm = Sys.WebForms.PageRequestManager.getInstance();
+                        if (!window.__igrPrmHooked) {
+                            window.__igrPrmHooked = true;
+                            prm.add_endRequest((sender, args) => {
+                                window.__igrEndRequest = true;
+                                if (args && args.get_error && args.get_error()) {
+                                    window.__igrPostbackError = args.get_error().message;
+                                }
+                            });
+                        }
+                    }
+                }"""
+            )
+        except Exception:
+            pass
+
+    async def _wait_for_prm_end(self, page: Page, timeout: float = 45.0):
+        """Wait until ASP.NET UpdatePanel async postback completes."""
+        await asyncio.sleep(0.5)
+        elapsed = 0.0
+        while elapsed < timeout:
+            self._check_cancelled()
+            try:
+                state = await page.evaluate(
+                    """(progressSel) => {
+                        let inAsync = false;
+                        if (window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager) {
+                            inAsync = Sys.WebForms.PageRequestManager.getInstance().get_isInAsyncPostBack();
+                        }
+                        let loaderVisible = false;
+                        for (const el of document.querySelectorAll(progressSel)) {
+                            const st = window.getComputedStyle(el);
+                            const r = el.getBoundingClientRect();
+                            if (st.display !== 'none' && st.visibility !== 'hidden' && r.width > 0 && r.height > 0) {
+                                loaderVisible = true;
+                                break;
+                            }
+                        }
+                        return {
+                            endFired: Boolean(window.__igrEndRequest),
+                            inAsync,
+                            loaderVisible,
+                        };
+                    }""",
+                    COMMON_SELECTORS["update_progress"],
+                )
+                if state["endFired"] and not state["inAsync"] and not state["loaderVisible"]:
+                    await asyncio.sleep(0.6)
+                    return
+                # If PRM isn't active and enough time passed with no loader, still check if results appeared
+                if elapsed >= 2.0 and not state["inAsync"] and not state["loaderVisible"] and await self._has_results_table(page):
+                    return
+            except Exception:
+                # Full page navigation may have occurred; wait for DOM ready
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    return
+                except Exception:
+                    pass
+            await asyncio.sleep(0.4)
+            elapsed += 0.4
+
+    async def _has_results_table(self, page: Page) -> bool:
+        try:
+            return await page.evaluate(
+                """() => {
+                    const tables = document.querySelectorAll("table[id*='RegistrationGrid' i], table[id*='Grid' i], table");
+                    for (const t of tables) {
+                        const st = window.getComputedStyle(t);
+                        const r = t.getBoundingClientRect();
+                        if (st.display === 'none' || st.visibility === 'hidden' || r.width === 0 || r.height === 0) continue;
+                        const id = (t.id || '').toLowerCase();
+                        const hasIndexBtn = Boolean(t.querySelector("input[value*='Index' i], a, input[value*='सूची']"));
+                        const rows = t.querySelectorAll('tr').length;
+                        if ((id.includes('grid') && rows >= 2) || (t.querySelector("input[value*='Index' i], input[value*='सूची'], a[href*='Index' i], a[onclick*='Index' i]") && rows >= 2)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }"""
+            )
+        except Exception:
+            return False
+
     async def _wait_for_loading_to_finish(self, page: Page, max_wait: float = 20.0):
         elapsed = 0.0
         step = 0.35
@@ -317,8 +409,14 @@ class IGRPortalBot:
         self._set_status("AWAITING_CAPTCHA", captcha_b64=b64_img)
 
         solution = None
+        browser_submitted = False
         for _ in range(600):  # up to 15 minutes
             await asyncio.sleep(1.5)
+            # If the user already clicked Search directly in the visible Chromium browser, detect results/postback
+            if not settings.headless and await self._has_results_table(page):
+                self._log("Detected search results already rendered from visible browser.", step="CAPTCHA")
+                browser_submitted = True
+                break
             db = SessionLocal()
             try:
                 job = db.query(SearchJob).filter(SearchJob.id == self.job_id).first()
@@ -361,6 +459,10 @@ class IGRPortalBot:
                 except Exception:
                     pass
 
+        if browser_submitted:
+            self._set_status("PROCESSING", captcha_b64=None)
+            return False
+
         if not solution:
             raise TimeoutError("Timed out waiting for manual CAPTCHA verification.")
 
@@ -370,7 +472,11 @@ class IGRPortalBot:
         return True
 
     async def _check_portal_error(self, page: Page) -> tuple[bool, str | None]:
-        """Inspect dialog or error labels after search submit. Returns (is_captcha_error, msg)."""
+        """Inspect dialog or error labels after search submit. Results table always takes precedence."""
+        if await self._has_results_table(page):
+            self.last_dialog_message = None
+            return False, None
+
         if self.last_dialog_message:
             msg = self.last_dialog_message
             self.last_dialog_message = None
@@ -664,13 +770,14 @@ class IGRPortalBot:
         self,
         context: BrowserContext,
         page: Page,
+        table_loc,
         row_index: int,
         row_cells: list[str],
         criteria: dict,
         fallback_sro: str,
         fallback_year: int,
     ) -> bool:
-        rows = page.locator(COMMON_SELECTORS["results_rows"])
+        rows = table_loc.locator("tr")
         row = rows.nth(row_index)
         link = row.locator(COMMON_SELECTORS["index_ii_link"]).first
         if await link.count() == 0:
@@ -733,10 +840,20 @@ class IGRPortalBot:
         except ValueError:
             fallback_year = datetime.utcnow().year
 
-        table = page.locator(COMMON_SELECTORS["results_table"]).first
-        if await table.count() == 0 or not await table.is_visible():
+        table_loc = page.locator("table[id*='RegistrationGrid' i], table[id*='Grid' i]").first
+        if await table_loc.count() == 0 or not await table_loc.is_visible():
+            table_loc = page.locator("table:has(input[value*='Index' i]), table:has(a:has-text('Index')), table:has(input[value*='सूची'])").first
+
+        if await table_loc.count() == 0 or not await table_loc.is_visible():
             self._log("No results table rendered for search criteria.", level="WARNING", step="RESULTS")
             return 0
+
+        try:
+            await table_loc.scroll_into_view_if_needed(timeout=3000)
+            table_id = await table_loc.get_attribute("id") or "(unnamed)"
+            self._log(f"Found results table '{table_id}'.", step="RESULTS")
+        except Exception:
+            pass
 
         page_num = 1
         total_saved = 0
@@ -744,7 +861,7 @@ class IGRPortalBot:
         while True:
             self._check_cancelled()
             self._log(f"Scanning search results page {page_num} ({fallback_sro}).", step="RESULTS")
-            rows = page.locator(COMMON_SELECTORS["results_rows"])
+            rows = table_loc.locator("tr")
             row_count = await rows.count()
 
             for i in range(row_count):
@@ -753,15 +870,16 @@ class IGRPortalBot:
                 if await row.locator(COMMON_SELECTORS["index_ii_link"]).count() == 0:
                     continue
                 row_cells = await row.locator("td").all_inner_texts()
-                if await self._open_and_extract_row(context, page, i, row_cells, criteria, fallback_sro, fallback_year):
+                if await self._open_and_extract_row(context, page, table_loc, i, row_cells, criteria, fallback_sro, fallback_year):
                     total_saved += 1
 
             next_pager = page.locator(f"a[href*='Page${page_num + 1}']").first
             if await next_pager.count() == 0:
                 break
             page_num += 1
-            await next_pager.click()
-            await self._wait_for_postback(page, delay=0.8)
+            await self._arm_prm_listener(page)
+            await next_pager.click(timeout=20000, no_wait_after=True)
+            await self._wait_for_prm_end(page, timeout=30.0)
 
         self._log(f"Saved {total_saved} Index-II record(s) for {fallback_sro}.", step="EXTRACT")
         return total_saved
@@ -802,14 +920,22 @@ class IGRPortalBot:
                                     await self._select_option(page, mode_cfg["sro_select"], criteria.get("sro"), "Sub-Registrar Office (SRO)")
                             except Exception:
                                 pass
-                    await self._request_manual_captcha(page, mode_cfg)
+                    should_submit = await self._request_manual_captcha(page, mode_cfg)
+                    if not should_submit:
+                        if not await self._has_results_table(page):
+                            await self._wait_for_prm_end(page, timeout=30.0)
+                        submitted_ok = True
+                        break
+
                     await self._wait_for_loading_to_finish(page)
                     self.last_dialog_message = None
 
-                    submit_btn = page.locator(mode_cfg["search_btn"]).first
-                    await submit_btn.click(timeout=30000, no_wait_after=True)
-                    self._log(f"Submitted search (attempt {attempt}/3). Waiting for results.", step="SEARCH")
-                    await self._wait_for_postback(page, delay=1.5)
+                    if not await self._has_results_table(page):
+                        await self._arm_prm_listener(page)
+                        submit_btn = page.locator(mode_cfg["search_btn"]).first
+                        await submit_btn.click(timeout=30000, no_wait_after=True)
+                        self._log(f"Submitted search (attempt {attempt}/3). Waiting for portal response.", step="SEARCH")
+                        await self._wait_for_prm_end(page, timeout=45.0)
 
                     is_captcha_err, portal_msg = await self._check_portal_error(page)
                     if is_captcha_err:
