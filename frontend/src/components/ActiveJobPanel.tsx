@@ -146,14 +146,16 @@ export function ActiveJobPanel({ job, onRefresh }: ActiveJobPanelProps) {
             <h3 className="text-sm font-semibold">Manual CAPTCHA Verification Required</h3>
           </div>
           <p className="mb-3 text-xs text-amber-800">
-            The Playwright browser session is paused with all form fields preserved. Enter the code below to submit and resume.
+            The Playwright browser session is paused with all form fields preserved. Enter the{" "}
+            <strong>exact case-sensitive</strong> characters shown (IGR CAPTCHAs use uppercase A–F and 0–9), or type &amp; click Search directly in the visible browser window.
           </p>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             {job.captcha_image_base64 ? (
               <img
                 src={`data:image/png;base64,${job.captcha_image_base64}`}
                 alt="IGR Portal CAPTCHA"
-                className="h-14 w-auto rounded-md border border-amber-300 bg-white p-1 shadow-xs"
+                style={{ imageRendering: "pixelated" }}
+                className="h-16 w-auto rounded-md border border-amber-300 bg-white p-1.5 shadow-xs"
               />
             ) : (
               <div className="flex h-14 w-36 items-center justify-center rounded-md border border-amber-200 bg-white text-xs text-slate-400">
