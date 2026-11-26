@@ -363,28 +363,54 @@ class IGRPortalBot:
         if trigger_postback:
             await loc.dispatch_event("change")
 
-    async def _capture_captcha_bytes(self, page: Page, img_loc) -> bytes:
-        await self._wait_for_loading_to_finish(page, max_wait=15.0)
-        for _ in range(12):
+    async def _wait_for_captcha_image_ready(self, page: Page, img_loc, timeout: float = 30.0) -> bool:
+        """Wait for CAPTCHA <img> to load (naturalWidth > 0), reloading src if blank/stalled."""
+        elapsed = 0.0
+        retried_reload = False
+        while elapsed < timeout:
+            self._check_cancelled()
             try:
-                ready = await img_loc.evaluate(
-                    "(el) => el.tagName.toLowerCase() === 'img' ? Boolean(el.complete && el.naturalWidth > 0) : true"
+                state = await img_loc.evaluate(
+                    """(el) => {
+                        const st = window.getComputedStyle(el);
+                        const hidden = st.display === 'none' || st.visibility === 'hidden';
+                        if (el.tagName.toLowerCase() === 'img') {
+                            return { hidden, ready: Boolean(el.complete && el.naturalWidth > 0) };
+                        }
+                        const r = el.getBoundingClientRect();
+                        return { hidden, ready: r.width > 0 && r.height > 0 };
+                    }"""
                 )
-                if ready:
-                    break
+                if not state["hidden"] and state["ready"]:
+                    return True
+                if not state["hidden"] and not state["ready"] and elapsed >= 12.0 and not retried_reload:
+                    retried_reload = True
+                    self._log("CAPTCHA image stalled loading; refreshing image source.", level="WARNING", step="CAPTCHA")
+                    await img_loc.evaluate(
+                        """(el) => {
+                            const base = el.src.split('&r=')[0];
+                            el.src = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now();
+                        }"""
+                    )
             except Exception:
-                break
+                pass
             await asyncio.sleep(0.4)
+            elapsed += 0.4
+        return False
+
+    async def _capture_captcha_bytes(self, page: Page, img_loc) -> bytes:
+        await self._wait_for_loading_to_finish(page, max_wait=20.0)
+        await self._wait_for_captcha_image_ready(page, img_loc, timeout=30.0)
 
         try:
             await img_loc.scroll_into_view_if_needed(timeout=3000)
         except Exception:
             pass
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.4)
 
         try:
-            shot = await img_loc.screenshot(timeout=5000)
-            if shot and len(shot) >= 400:
+            shot = await img_loc.screenshot(timeout=8000)
+            if shot and len(shot) >= 300:
                 return shot
         except Exception:
             pass
@@ -397,11 +423,13 @@ class IGRPortalBot:
         input_loc = page.locator(mode_cfg["captcha_input"]).first
 
         try:
-            await img_loc.wait_for(state="visible", timeout=10000)
+            await img_loc.wait_for(state="attached", timeout=15000)
         except Exception:
             pass
 
-        if await img_loc.count() == 0 or await input_loc.count() == 0 or not await img_loc.is_visible():
+        ready = await self._wait_for_captcha_image_ready(page, img_loc, timeout=30.0)
+
+        if await img_loc.count() == 0 or await input_loc.count() == 0 or not ready:
             self._log("No visible CAPTCHA detected on active form; proceeding.", step="CAPTCHA")
             return False
 
@@ -463,7 +491,9 @@ class IGRPortalBot:
         if not solution:
             raise TimeoutError("Timed out waiting for manual CAPTCHA verification.")
 
-        await input_loc.fill(solution)
+        await input_loc.click(timeout=5000)
+        await input_loc.fill("")
+        await input_loc.type(solution, delay=35)
         self._set_status("PROCESSING", captcha_b64=None)
         self._log("CAPTCHA entered; submitting search.", step="CAPTCHA")
         return True
