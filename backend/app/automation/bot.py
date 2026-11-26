@@ -814,16 +814,28 @@ class IGRPortalBot:
         downloaded_file: tuple[Path, str] | None = None
         popup_page: Page | None = None
 
-        # Listen safely for download OR new tab OR same-page navigation
-        download_task = asyncio.create_task(page.wait_for_event("download", timeout=6000))
-        page_task = asyncio.create_task(context.wait_for_event("page", timeout=6000))
+        await self._arm_prm_listener(page)
+        # IndexII postback on the government portal can take 10-30s before opening popup/download or updating #upReportSearch
+        download_task = asyncio.create_task(page.wait_for_event("download", timeout=30000))
+        page_task = asyncio.create_task(context.wait_for_event("page", timeout=30000))
+        prm_task = asyncio.create_task(self._wait_for_prm_end(page, timeout=30.0))
         try:
-            await link.click(timeout=10000)
+            await link.click(timeout=15000, no_wait_after=True)
             done, pending = await asyncio.wait(
-                {download_task, page_task},
-                timeout=6.0,
+                {download_task, page_task, prm_task},
+                timeout=32.0,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            # If PRM completed first, wait briefly in case it triggered window.open() or download right after endRequest
+            if prm_task in done and download_task not in done and page_task not in done:
+                done2, pending2 = await asyncio.wait(
+                    {download_task, page_task},
+                    timeout=5.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                done |= done2
+                pending = pending2
+
             for t in pending:
                 t.cancel()
             if download_task in done and not download_task.exception():
@@ -836,7 +848,7 @@ class IGRPortalBot:
             elif page_task in done and not page_task.exception():
                 popup_page = page_task.result()
         finally:
-            for t in (download_task, page_task):
+            for t in (download_task, page_task, prm_task):
                 if not t.done():
                     t.cancel()
 

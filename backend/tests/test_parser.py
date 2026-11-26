@@ -148,6 +148,29 @@ class TestIGRParser(unittest.TestCase):
         self.assertEqual(parsed["party_details"]["seller_or_first_party"], "Ramesh Kulkarni")
         self.assertEqual(parsed["party_details"]["buyer_or_second_party"], "Suresh Patil")
 
+    def test_parse_real_registration_grid_row_with_portal_header_noise(self):
+        row = [
+            "2908",
+            "अँग्रीमेंट टू सेल",
+            "13/07/2020",
+            "सह दु.नि. हवेली 5",
+            '{"मान्यता देणार-- श्री.रामचंद्र भोकरे"}',
+            "{पुजाप्रदीपचव्हाण,प्रदीपसतीशचव्हाण}",
+            ", इतर माहिती: पुणे महानगरपालिका हद्दीतील मौजे वडगाव शेरी मधील स.नं.42 हिस्सा नंबर 2/2बी/2/1/10 यांसी क्षेत्र 300 चौ.मी.",
+            "5",
+            "4",
+        ]
+        noisy_page_text = "दस्त निहाय/Document Number User Guide FAQ\nदुय्यम निबंधक/SRO\nSeller Name Purchaser Name Property Description"
+        parsed = parse_index_ii_text(noisy_page_text, row_cells=row, fallback_sro="Joint S.R. Haveli 5", fallback_year=2020)
+        self.assertEqual(parsed["document_number"], "2908")
+        self.assertEqual(parsed["sro_name"], "सह दु.नि. हवेली 5")
+        self.assertEqual(parsed["article_type"], "अँग्रीमेंट टू सेल")
+        self.assertEqual(str(parsed["registration_date"]), "2020-07-13")
+        self.assertEqual(parsed["registration_year"], 2020)
+        self.assertIn("42", parsed["survey_cts_number"])
+        self.assertIn("रामचंद्र", parsed["party_details"]["seller_or_first_party"])
+        self.assertIn("पुजाप्रदीपचव्हाण", parsed["party_details"]["buyer_or_second_party"])
+
     def test_selectors_cover_all_portal_modes(self):
         for mode in ("PROPERTY_MUMBAI", "PROPERTY_REST_OF_MH", "PROPERTY_URBAN", "DOCUMENT"):
             cfg = MODE_SELECTORS[mode]

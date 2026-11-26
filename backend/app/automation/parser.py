@@ -267,20 +267,34 @@ def _extract_field(text: str, patterns: list[str]) -> str | None:
     return None
 
 
+def _clean_party_cell(val: str) -> str:
+    return re.sub(r'^[\s{"\']+|[\s}"\']+$', "", val).strip()
+
+
 def parse_index_ii_text(
     text: str,
     row_cells: list[str] | None = None,
     fallback_sro: str = "IGR Maharashtra",
     fallback_year: int | None = None,
 ) -> dict[str, Any]:
-    """Extract normalized registration fields from Index-II text and optional summary row cells."""
+    """Extract normalized registration fields from Index-II text and optional RegistrationGrid row cells."""
     cells = [c.strip() for c in (row_cells or []) if c and c.strip()]
     joined_row = " | ".join(cells)
 
-    doc_number = _extract_field(
+    # RegistrationGrid columns: [DocNo, DName, RDate, SROName, Seller, Purchaser, PropertyDesc, SROCode, Status]
+    grid_doc = cells[0] if len(cells) >= 7 and re.fullmatch(r"[A-Za-z0-9/\-]{1,20}", cells[0]) else None
+    grid_article = cells[1] if len(cells) >= 7 and cells[1] else None
+    grid_date = parse_date_string(cells[2]) if len(cells) >= 7 else None
+    grid_sro = cells[3] if len(cells) >= 7 and cells[3] and not cells[3].startswith("/") else None
+    grid_seller = _clean_party_cell(cells[4]) if len(cells) >= 7 and cells[4] else None
+    grid_buyer = _clean_party_cell(cells[5]) if len(cells) >= 7 and cells[5] else None
+    grid_prop = cells[6].lstrip(", ").strip() if len(cells) >= 7 and cells[6] else None
+
+    doc_number = grid_doc or _extract_field(
         text,
         [
-            r"(?:Document\s*(?:No\.?|Number)|Doc\.?\s*No\.?|दस्त\s*क्रमांक)\s*[:\-]?\s*([A-Za-z0-9/\-]+)",
+            r"(?:Document\s*(?:No\.?|Number)\s*[:\-]|Doc\.?\s*No\.?\s*[:\-]|दस्त\s*क्रमांक\s*[:\-])\s*([A-Za-z0-9/\-]+)",
+            r"(?:Document\s*(?:No\.?|Number)|Doc\.?\s*No\.?|दस्त\s*क्रमांक)\s+(\d+[A-Za-z0-9/\-]*)",
         ],
     )
     if not doc_number and cells:
@@ -289,21 +303,23 @@ def parse_index_ii_text(
                 doc_number = cell
                 break
 
-    sro_name = _extract_field(
+    sro_name = grid_sro or _extract_field(
         text,
         [
-            r"(?:SRO\s*Name|Sub-?Registrar(?:\s*Office)?|दुय्यम\s*निबंधक(?:\s*कार्यालय)?)\s*[:\-]?\s*([^\n\r]+)",
+            r"(?:SRO\s*Name|Sub-?Registrar(?:\s*Office)?|दुय्यम\s*निबंधक(?:\s*कार्यालय)?)\s*[:\-]\s*([^\n\r]+)",
         ],
     ) or fallback_sro
 
-    reg_date_raw = _extract_field(
-        text,
-        [
-            r"(?:Registration\s*Date|Date\s*of\s*Registration|नोंदणी\s*दिनांक)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-            r"(\d{2}/\d{2}/\d{4})",
-        ],
-    )
-    reg_date = parse_date_string(reg_date_raw)
+    reg_date = grid_date
+    if not reg_date:
+        reg_date_raw = _extract_field(
+            text,
+            [
+                r"(?:Registration\s*Date|Date\s*of\s*Registration|नोंदणी\s*दिनांक)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+                r"(\d{2}/\d{2}/\d{4})",
+            ],
+        )
+        reg_date = parse_date_string(reg_date_raw)
 
     year_val = fallback_year
     if not year_val and reg_date:
@@ -312,10 +328,10 @@ def parse_index_ii_text(
         year_match = re.search(r"(?:Year|सन)\s*[:\-]?\s*(19\d{2}|20\d{2})", text, re.I)
         year_val = int(year_match.group(1)) if year_match else datetime.utcnow().year
 
-    article_type = _extract_field(
+    article_type = grid_article or _extract_field(
         text,
         [
-            r"(?:Document\s*Type|Nature\s*of\s*Document|Article|दस्त\s*प्रकार|दस्ताचा\s*प्रकार)\s*[:\-]?\s*([^\n\r]+)",
+            r"(?:Document\s*Type|Nature\s*of\s*Document|Article|दस्त\s*प्रकार|दस्ताचा\s*प्रकार)\s*[:\-]\s*([^\n\r]+)",
         ],
     )
 
@@ -332,30 +348,31 @@ def parse_index_ii_text(
         ],
     )
 
-    seller = _extract_field(
+    seller = grid_seller or _extract_field(
         text,
         [
-            r"(?:Seller|Party\s*1|First\s*Party|Executant|देणार|लिहून\s*देणार)\s*[:\-]?\s*([^\n\r]+)",
+            r"(?:Seller|Party\s*1|First\s*Party|Executant|देणार|लिहून\s*देणार)\s*[:\-]\s*([^\n\r]+)",
         ],
     )
-    buyer = _extract_field(
+    buyer = grid_buyer or _extract_field(
         text,
         [
-            r"(?:Buyer|Purchaser|Party\s*2|Second\s*Party|Claimant|घेणार|लिहून\s*घेणार)\s*[:\-]?\s*([^\n\r]+)",
+            r"(?:Buyer|Purchaser|Party\s*2|Second\s*Party|Claimant|घेणार|लिहून\s*घेणार)\s*[:\-]\s*([^\n\r]+)",
         ],
     )
 
+    combined_prop = f"{grid_prop or ''}\n{text}"
     survey_cts = _extract_field(
-        text,
+        combined_prop,
         [
-            r"(?:Survey\s*No\.?|CTS\s*No\.?|Gat\s*No\.?|Plot\s*No\.?|City\s*Survey\s*No\.?|सर्व्हे\s*नं\.?|गट\s*नं\.?|भूमापन\s*क्रमांक)\s*[:\-]?\s*([^\n\r]+)",
+            r"(?:Survey\s*No\.?|CTS\s*No\.?|Gat\s*No\.?|Plot\s*No\.?|City\s*Survey\s*No\.?|सर्व्हे\s*नं\.?|स\.नं\.?|गट\s*नं\.?|भूमापन\s*क्रमांक)\s*[:\-]?\s*([0-9A-Za-z/\-]+(?:\s+हिस्सा\s*(?:नंबर|नं\.?)?\s*[0-9A-Za-z/\-\u0900-\u097f]+)?)",
         ],
     )
 
-    property_desc = _extract_field(
+    property_desc = grid_prop or _extract_field(
         text,
         [
-            r"(?:Property\s*Description|Property\s*Details|मिळकतीचे\s*वर्णन|पत्ता)\s*[:\-]?\s*([^\n\r]+(?:\n[^\n\r]+){0,3})",
+            r"(?:Property\s*Description|Property\s*Details|मिळकतीचे\s*वर्णन|इतर\s*माहिती)\s*[:\-]\s*([^\n\r]+(?:\n[^\n\r]+){0,3})",
         ],
     )
 
