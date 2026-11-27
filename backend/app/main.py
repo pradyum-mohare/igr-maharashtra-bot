@@ -35,6 +35,16 @@ app.add_middleware(
 app.include_router(jobs_router)
 
 
+@app.get("/")
+def root():
+    return {
+        "service": "IGR Maharashtra Free Search Automation API",
+        "status": "ok",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
