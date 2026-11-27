@@ -943,7 +943,10 @@ class IGRPortalBot:
 
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=settings.headless)
+                browser = await p.chromium.launch(
+                    headless=settings.headless,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                )
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 page.set_default_timeout(30000)

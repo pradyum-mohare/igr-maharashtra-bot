@@ -16,7 +16,10 @@ _meta_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="igr-meta"
 
 
 async def _open_portal_page(playwright):
-    browser = await playwright.chromium.launch(headless=True)
+    browser = await playwright.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    )
     page = await browser.new_page()
     page.set_default_timeout(35000)
     await page.goto(settings.igr_portal_url, wait_until="commit", timeout=60000)
