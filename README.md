@@ -150,9 +150,42 @@ python -m unittest discover -s tests -v
 
 ---
 
-## Deployment Guide (Render + Vercel)
+## Deployment Guide
 
-### 1. Backend & PostgreSQL on Render (`render.yaml`)
+### Option A: AWS EC2 Mumbai (`ap-south-1`) + Vercel (Recommended for Live Portal Access)
+Because `freesearchigrservice.maharashtra.gov.in` drops connections from non-Indian cloud IPs, hosting the backend in **AWS Mumbai (`ap-south-1`)** ensures Playwright reaches the portal reliably while Caddy provisions automatic HTTPS for Vercel.
+
+1. **Launch EC2 Instance in `ap-south-1` (Mumbai)**:
+   - AMI: **Ubuntu 24.04 LTS** (`t3.small` recommended, or `t2.micro`/`t3.micro` with 2 GB swap).
+   - Security Group inbound rules: allow **TCP 22 (SSH)**, **TCP 80 (HTTP)**, and **TCP 443 (HTTPS)** from `0.0.0.0/0`.
+2. **SSH into EC2 and install Docker + 2 GB swap**:
+   ```bash
+   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 git
+   sudo usermod -aG docker $USER && newgrp docker
+   ```
+3. **Clone & Start with Automatic HTTPS (`sslip.io`)**:
+   Replace `<EC2_PUBLIC_IP>` with your instance's public IPv4 (e.g., `13.232.10.20`):
+   ```bash
+   git clone https://github.com/pradyum-mohare/igr-maharashtra-bot.git
+   cd igr-maharashtra-bot
+   cat << 'EOF' > .env
+   API_DOMAIN=<EC2_PUBLIC_IP>.sslip.io
+   CORS_ORIGINS=https://igr-maharashtra-bot.vercel.app
+   POSTGRES_USER=igr_user
+   POSTGRES_PASSWORD=change_this_strong_password
+   POSTGRES_DB=igr_db
+   EOF
+   docker compose -f docker-compose.prod.yml up -d --build
+   ```
+4. **Verify**:
+   - `https://<EC2_PUBLIC_IP>.sslip.io/health` → `{"status":"ok"}`
+   - `https://<EC2_PUBLIC_IP>.sslip.io/docs` → Swagger API Docs
+5. **Point Vercel Frontend to AWS Mumbai**:
+   - In Vercel → **Settings → Environment Variables**, set `NEXT_PUBLIC_API_URL` = `https://<EC2_PUBLIC_IP>.sslip.io` and **Redeploy**.
+
+### Option B: Render + Vercel (`render.yaml`)
 1. Go to [Render Dashboard](https://dashboard.render.com/) → **New +** → **Blueprint**.
 2. Connect your GitHub repo `pradyum-mohare/igr-maharashtra-bot`. Render reads `render.yaml` automatically to provision:
    - **`igr-postgres`** (Managed PostgreSQL)

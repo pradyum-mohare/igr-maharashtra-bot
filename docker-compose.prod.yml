@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: igr_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-igr_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-igr_password}
+      POSTGRES_DB: ${POSTGRES_DB:-igr_db}
+    volumes:
+      - igr_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-igr_user} -d ${POSTGRES_DB:-igr_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: igr_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-igr_user}:${POSTGRES_PASSWORD:-igr_password}@postgres:5432/${POSTGRES_DB:-igr_db}
+      IGR_PORTAL_URL: https://freesearchigrservice.maharashtra.gov.in/
+      STORAGE_BACKEND: local
+      STORAGE_DIR: /app/storage/documents
+      HEADLESS: "true"
+      JOB_CONCURRENCY: "2"
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://igr-maharashtra-bot.vercel.app}
+      PORT: "8000"
+    volumes:
+      - igr_documents:/app/storage/documents
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: igr_caddy
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN e.g. 13.232.10.20.sslip.io}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  igr_pgdata:
+  igr_documents:
+  caddy_data:
+  caddy_config:
