@@ -40,7 +40,7 @@ export default function DashboardPage() {
         api.listJobs({ status: statusFilter }).catch(() => null),
         api.listRecords({ q: recordQuery || undefined, year: recordYear || undefined }).catch(() => null),
       ]);
-      setApiHealthy(healthRes);
+      setApiHealthy(Boolean(healthRes || jobsRes !== null || recordsRes !== null));
       if (jobsRes) {
         setJobs(jobsRes);
         if (!selectedJobId && jobsRes.length > 0) {
