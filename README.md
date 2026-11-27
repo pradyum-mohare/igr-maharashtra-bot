@@ -125,6 +125,9 @@ Open `http://localhost:3000`.
 
 - `GET /health` — Health check
 - `GET /api/metadata/districts` — Supported Maharashtra districts (English & Marathi)
+- `GET /api/metadata/sros?district=...` — Cached live portal Sub-Registrar Offices for a district
+- `GET /api/metadata/tahsils?district=...` — Cached live portal Tahsils for a district
+- `GET /api/metadata/villages?district=...&tahsil=...` — Cached live portal Villages for a tahsil
 - `POST /api/jobs` — Queue a new `PROPERTY` or `DOCUMENT` search job
 - `GET /api/jobs` — List search jobs (optional `?status=` and `?search_type=` filters)
 - `GET /api/jobs/{job_id}` — Detailed job status, CAPTCHA base64 image, logs, and records
@@ -147,7 +150,23 @@ python -m unittest discover -s tests -v
 
 ---
 
-## Deployment Notes
+## Deployment Guide (Render + Vercel)
 
-- **Backend**: Build with `backend/Dockerfile` (based on `mcr.microsoft.com/playwright/python:v1.48.0-jammy`) and deploy to a container host (Render, Railway, Fly.io, or VM) with `HEADLESS=true`, managed PostgreSQL `DATABASE_URL`, persistent volume mounted at `/app/storage/documents`, and `CORS_ORIGINS` set to your deployed frontend URL.
-- **Frontend**: Deploy `frontend/` to Vercel or build with `frontend/Dockerfile`, setting `NEXT_PUBLIC_API_URL` to your public FastAPI URL.
+### 1. Backend & PostgreSQL on Render (`render.yaml`)
+1. Go to [Render Dashboard](https://dashboard.render.com/) → **New +** → **Blueprint**.
+2. Connect your GitHub repo `pradyum-mohare/igr-maharashtra-bot`. Render reads `render.yaml` automatically to provision:
+   - **`igr-postgres`** (Managed PostgreSQL)
+   - **`igr-maharashtra-api`** (Docker Web Service from `backend/Dockerfile`, `HEADLESS=true`, health check `/health`)
+3. When prompted for **`CORS_ORIGINS`**, enter `*` temporarily (you will update it to your exact Vercel URL in Step 3).
+4. Once deployed, verify `https://<your-render-service>.onrender.com/health` and Swagger docs at `https://<your-render-service>.onrender.com/docs`.
+   - *Note*: Render Free web services use ephemeral disk storage (downloaded PDFs persist during the running instance; attach a Render Persistent Disk at `/app/storage/documents` on a paid plan for long-term retention).
+
+### 2. Frontend on Vercel
+1. Go to [Vercel](https://vercel.com/new) and import `pradyum-mohare/igr-maharashtra-bot`.
+2. Set **Root Directory** to **`frontend`** (Framework Preset: **Next.js**).
+3. Add Environment Variable:
+   - `NEXT_PUBLIC_API_URL` = `https://<your-render-service>.onrender.com` (no trailing slash).
+4. Click **Deploy** to get `https://<your-app>.vercel.app`.
+
+### 3. Lock Down CORS
+In Render → `igr-maharashtra-api` → **Environment**, set `CORS_ORIGINS` to `https://<your-app>.vercel.app` and redeploy/save.

@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +13,13 @@ class Settings(BaseSettings):
     job_concurrency: int = 2
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value: str) -> str:
+        if isinstance(value, str) and value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql://", 1)
+        return value
 
     def resolved_storage_path(self) -> Path:
         path = Path(self.storage_dir).resolve()
