@@ -406,16 +406,50 @@ class IGRPortalBot:
             await img_loc.scroll_into_view_if_needed(timeout=3000)
         except Exception:
             pass
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
 
+        # 1. Primary: direct element screenshot (animations disabled prevents stability timeouts)
         try:
-            shot = await img_loc.screenshot(timeout=8000)
-            if shot and len(shot) >= 300:
+            shot = await img_loc.screenshot(timeout=10000, animations="disabled")
+            if shot and len(shot) >= 200:
                 return shot
+        except Exception as exc:
+            self._log(f"Element CAPTCHA screenshot fallback ({type(exc).__name__}).", level="WARNING", step="CAPTCHA")
+
+        # 2. Secondary: extract exact loaded <img> pixels via HTML5 canvas
+        try:
+            data_url = await img_loc.evaluate(
+                """(img) => {
+                    if (!img || !img.naturalWidth || !img.naturalHeight) return null;
+                    const c = document.createElement('canvas');
+                    c.width = img.naturalWidth;
+                    c.height = img.naturalHeight;
+                    const ctx = c.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    return c.toDataURL('image/png');
+                }"""
+            )
+            if data_url and "," in data_url:
+                return base64.b64decode(data_url.split(",", 1)[1])
         except Exception:
             pass
 
-        return await page.screenshot(full_page=False, timeout=5000)
+        # 3. Tertiary: clipped page screenshot around the CAPTCHA bounding box
+        try:
+            box = await img_loc.bounding_box(timeout=3000)
+            if box and box["width"] > 0 and box["height"] > 0:
+                pad = 6
+                clip = {
+                    "x": max(0.0, box["x"] - pad),
+                    "y": max(0.0, box["y"] - pad),
+                    "width": box["width"] + pad * 2,
+                    "height": box["height"] + pad * 2,
+                }
+                return await page.screenshot(clip=clip, timeout=5000)
+        except Exception:
+            pass
+
+        raise RuntimeError("Failed to capture cropped CAPTCHA image from portal.")
 
     async def _request_manual_captcha(self, page: Page, mode_cfg: dict) -> bool:
         """Pause session and wait for manual CAPTCHA entry in dashboard (or visible browser)."""
