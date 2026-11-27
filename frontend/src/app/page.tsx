@@ -17,7 +17,7 @@ import {
 import { ActiveJobPanel } from "@/components/ActiveJobPanel";
 import { SearchForm } from "@/components/SearchForm";
 import { StatusBadge } from "@/components/StatusBadge";
-import { api } from "@/lib/api";
+import { API_BASE, api } from "@/lib/api";
 import type { DistrictOption, JobDetail, JobSummary, PropertyRecord, SearchType } from "@/lib/types";
 
 export default function DashboardPage() {
@@ -86,13 +86,14 @@ export default function DashboardPage() {
       jobs.some((j) => ["PENDING", "PROCESSING", "AWAITING_CAPTCHA"].includes(j.status)) ||
       (selectedJob && ["PENDING", "PROCESSING", "AWAITING_CAPTCHA"].includes(selectedJob.status));
 
-    if (!hasActive) return;
+    if (!hasActive && apiHealthy !== false) return;
+    const intervalMs = hasActive ? 2000 : 5000;
     const timer = setInterval(() => {
       loadOverview();
-      loadSelectedJob();
-    }, 2000);
+      if (hasActive) loadSelectedJob();
+    }, intervalMs);
     return () => clearInterval(timer);
-  }, [jobs, selectedJob, loadOverview, loadSelectedJob]);
+  }, [jobs, selectedJob, apiHealthy, loadOverview, loadSelectedJob]);
 
   const handleCreateJob = async (payload: { search_type: SearchType; criteria: Record<string, unknown> }) => {
     const created = await api.createJob(payload);
@@ -141,7 +142,7 @@ export default function DashboardPage() {
                   apiHealthy ? "bg-emerald-500" : apiHealthy === false ? "bg-rose-500" : "bg-slate-400"
                 }`}
               />
-              {apiHealthy ? "FastAPI Connected" : apiHealthy === false ? "Backend Offline" : "Checking API..."}
+              {apiHealthy ? "FastAPI Connected" : apiHealthy === false ? `Backend Offline (${API_BASE})` : "Checking API..."}
             </span>
             <button
               type="button"
