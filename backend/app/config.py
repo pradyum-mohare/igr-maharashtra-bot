@@ -27,7 +27,7 @@ class Settings(BaseSettings):
         return path
 
     def parsed_cors_origins(self) -> list[str]:
-        origins = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        origins = [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
         return origins or ["*"]
 
 
